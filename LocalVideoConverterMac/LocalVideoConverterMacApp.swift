@@ -1,10 +1,3 @@
-//
-//  LocalVideoConverterMacApp.swift
-//  LocalVideoConverterMac
-//
-//  Created by Luis Flacke on 7/2/25.
-//
-
 import SwiftUI
 
 @main
@@ -13,5 +6,6 @@ struct LocalVideoConverterMacApp: App {
         WindowGroup {
             ContentView()
         }
+        .windowStyle(HiddenTitleBarWindowStyle()) // Optional: Hide the title bar for a cleaner look
     }
 }
