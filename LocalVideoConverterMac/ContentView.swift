@@ -179,8 +179,19 @@ struct ContentView: View {
         arguments.append(outputURL.path)
 
         // Run FFmpeg
+        
+        
         let task = Process()
-        task.launchPath = "/opt/homebrew/bin/ffmpeg" // Set the FFmpeg path here
+        
+        if let ffmpegPath = Bundle.main.path(forResource: "ffmpeg", ofType: nil) {
+            task.launchPath = ffmpegPath
+        } else {
+            print("FFmpeg not found in bundle")
+            return
+        }
+        
+        // out commented
+        //task.launchPath = "/opt/homebrew/bin/ffmpeg" // Set the FFmpeg path here
         task.arguments = arguments
 
         task.terminationHandler = { _ in

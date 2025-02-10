@@ -75,10 +75,10 @@
 		7CA1A2EE2D56B75400F1FDB3 = {
 			isa = PBXGroup;
 			children = (
-				7CA1A2F92D56B75400F1FDB3 /* LocalVideoConverterMac */,
 				7CA1A30B2D56B75500F1FDB3 /* LocalVideoConverterMacTests */,
 				7CA1A3152D56B75500F1FDB3 /* LocalVideoConverterMacUITests */,
 				7CA1A2F82D56B75400F1FDB3 /* Products */,
+				7CA1A2F92D56B75400F1FDB3 /* LocalVideoConverterMac */,
 			);
 			sourceTree = "<group>";
 		};
