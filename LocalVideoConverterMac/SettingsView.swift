@@ -4,17 +4,22 @@ struct SettingsView: View {
     @Binding var outputFormat: String
     @Binding var videoQuality: String
     @Binding var audioCodec: String
-    @Environment(\.presentationMode) var presentationMode // To dismiss the sheet
+    @Binding var videoCodec: String  // NEW: Add binding for the video codec
+    @Environment(\.presentationMode) var presentationMode
 
     var body: some View {
         VStack {
-            // Settings Form
             Form {
                 Picker("Output Format", selection: $outputFormat) {
                     Text("MP4").tag("mp4")
                     Text("MOV").tag("mov")
-                    Text("AVI").tag("avi")
-                    Text("MKV").tag("mkv")
+                    // ... other formats
+                }
+
+                // NEW: Video Codec Picker
+                Picker("Video Codec", selection: $videoCodec) {
+                    Text("H.264").tag("h264")
+                    Text("HEVC (H.265)").tag("hevc")
                 }
 
                 Picker("Video Quality", selection: $videoQuality) {
@@ -31,10 +36,9 @@ struct SettingsView: View {
             }
             .padding()
 
-            // Save and Cancel Buttons
-            HStack {
+            HStack { //Cancel and Save Buttons
                 Button(action: {
-                    presentationMode.wrappedValue.dismiss() // Dismiss the sheet
+                    presentationMode.wrappedValue.dismiss()
                 }) {
                     Text("Cancel")
                         .padding()
@@ -45,8 +49,7 @@ struct SettingsView: View {
                 }
 
                 Button(action: {
-                    // Save settings (no additional action needed since @Binding updates automatically)
-                    presentationMode.wrappedValue.dismiss() // Dismiss the sheet
+                    presentationMode.wrappedValue.dismiss()
                 }) {
                     Text("Save")
                         .padding()
@@ -58,7 +61,7 @@ struct SettingsView: View {
             }
             .padding()
         }
-        .frame(width: 300, height: 300)
+        .frame(width: 300, height: 300) //Adjust Size for the new Picker
     }
 }
 
@@ -67,7 +70,8 @@ struct SettingsView_Previews: PreviewProvider {
         SettingsView(
             outputFormat: .constant("mp4"),
             videoQuality: .constant("high"),
-            audioCodec: .constant("aac")
+            audioCodec: .constant("aac"),
+            videoCodec: .constant("h264") // Provide a default value for the preview
         )
     }
 }
