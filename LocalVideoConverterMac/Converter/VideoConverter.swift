@@ -1,113 +1,261 @@
 import Foundation
-import AVFoundation
-import AppKit
+import AVFoundation // Keep for duration calculation if needed within ViewModel
+import AppKit // Keep for NSApplication delegate interaction if needed later
 
+/// ObservableObject acting as the ViewModel for video conversion.
+/// Manages conversion state, settings, interaction with `FFmpegProcessRunner`,
+/// and provides published properties for the SwiftUI View (`ContentView`).
 class VideoConverter: ObservableObject {
-    // MARK: - Published Properties
 
-    /// Published property to track if a video conversion is currently in progress.
-    /// UI elements can observe this to show progress indicators or disable controls.
+    // MARK: - Published Properties for UI Binding
+
+    /// The URL of the input video file selected by the user.
+    @Published var inputURL: URL? = nil {
+        didSet { // Clear messages when input changes
+            clearMessages()
+            // Automatically determine a default output URL when input changes
+            updateDefaultOutputURL()
+        }
+    }
+    /// The automatically suggested URL for the output file.
+    @Published var defaultOutputURL: URL? = nil
+
+    /// Indicates if a conversion is currently active.
     @Published var isConverting = false
-
-    /// Published property to report the conversion progress (0.0 to 1.0).
-    /// ProgressView in ContentView observes this to update the UI.
+    /// Current conversion progress (0.0 to 1.0).
     @Published var progress: Double = 0.0
-
-    /// Published property to hold any error message that occurs during conversion.
-    /// ContentView observes this to display error messages to the user.
+    /// Holds the latest error message for display.
     @Published var errorMessage: String? = nil
+    /// Holds the latest success message for display.
+    @Published var successMessage: String? = nil
 
+    // MARK: - Published Settings (Bound from SettingsView)
+
+    /// Selected output container format (e.g., "mp4", "mov").
+    @Published var outputFormat = "mp4" { didSet { updateDefaultOutputURL() } }
+    /// Selected video quality preset ("high", "medium", "low").
+    @Published var videoQuality = "medium"
+    /// Selected audio codec ("aac", "mp3", "none").
+    @Published var audioCodec = "aac"
+    /// Selected video codec ("h264", "hevc").
+    @Published var videoCodec = "h264"
 
     // MARK: - Private Properties
 
-    /// Instance of FFmpegCommandBuilder to construct FFmpeg command-line arguments.
+    /// Service responsible for building FFmpeg commands.
     private let commandBuilder = FFmpegCommandBuilder()
-
-    /// Instance of FFmpegProcessRunner to execute FFmpeg commands.
+    /// Service responsible for running FFmpeg processes.
     private let processRunner = FFmpegProcessRunner()
+    /// Stores the input URL specifically for managing security-scoped access.
+    private var securityScopedInputURL: URL? = nil
 
-    /// Stores the input video URL for security-scoped resource access.
-    /// This is needed to stop accessing the resource when conversion is finished or cancelled.
-    private var inputURLForSecurity: URL?
-
-
-    // MARK: - Initializer
+    // MARK: - Initialization
 
     init() {
-        processRunner.delegate = self // Set VideoConverter as delegate for processRunner callbacks.
+        // Set self as the delegate to receive callbacks from the process runner.
+        processRunner.delegate = self
+        print("VideoConverter initialized. ProcessRunner delegate set.")
     }
 
+    // MARK: - Public Methods for UI Interaction
 
-    // MARK: - Conversion Functions
+    /// Sets the input video URL, ensuring it's a valid video file.
+    /// - Parameter url: The URL selected or dropped by the user.
+    func setInputURL(_ url: URL?) {
+        DispatchQueue.main.async { // Ensure UI updates happen on main thread
+            guard let url = url else {
+                self.inputURL = nil
+                return
+            }
 
-    /// Initiates the video conversion process.
-    func convertVideo(inputURL: URL, outputURL: URL, outputFormat: String, videoCodec: String, videoQuality: String, audioCodec: String) {
-        isConverting = true    // Set conversion state to true
-        progress = 0          // Reset progress
-        errorMessage = nil     // Clear previous error
-        inputURLForSecurity = inputURL // Store input URL for security access
+            // Validate if it's a video file *before* assigning
+            if FileUtilities.isVideoFile(url) {
+                self.inputURL = url
+                // Note: Security scope access is started in FileUtilities.selectFile
+                // or should be started here if handling drops required it *before* validation.
+                // For now, assume selectFile handled it, or conversion will start it.
+            } else {
+                self.inputURL = nil
+                self.errorMessage = "'\(url.lastPathComponent)' is not recognized as a valid video file."
+            }
+        }
+    }
 
-        guard inputURL.startAccessingSecurityScopedResource() else { // Start accessing security-scoped resource
-            self.errorMessage = "Unable to access security scoped resource."
-            isConverting = false
-            return // Exit if security access fails
+    /// Clears the current input selection and related messages.
+    func clearInput() {
+        DispatchQueue.main.async {
+            // Stop security access if we were holding onto it from a previous selection
+            self.stopSecurityAccess()
+            self.inputURL = nil
+            self.clearMessages()
+            print("Input cleared.")
+        }
+    }
+
+    /// Initiates the video conversion process using the current settings.
+    func startConversion() {
+        clearMessages()
+
+        guard let currentInputURL = inputURL else {
+            errorMessage = "No input video selected."
+            return
         }
 
-        guard let ffmpegPath = Bundle.main.path(forResource: "ffmpeg", ofType: nil) else { // Locate FFmpeg executable
-            self.errorMessage = "FFmpeg not found in bundle."
-            self.isConverting = false
-            inputURL.stopAccessingSecurityScopedResource() // Stop accessing resource on failure
-            return // Exit if FFmpeg not found
+        // Ensure we have security access before proceeding
+        guard startSecurityAccess(url: currentInputURL) else {
+            errorMessage = "Could not get permission to access the input video file. Please select it again."
+            return
         }
 
-        let arguments = commandBuilder.buildCommand( // Build FFmpeg command arguments
-            inputURL: inputURL, outputURL: outputURL, outputFormat: outputFormat,
-            videoCodec: videoCodec, videoQuality: videoQuality, audioCodec: audioCodec
+        // Choose output location
+        guard let outputURL = FileUtilities.chooseOutputURL(defaultURL: defaultOutputURL ?? currentInputURL, selectedFormat: outputFormat) else {
+            // User cancelled save panel
+            print("User cancelled output selection.")
+            // Stop access if we started it just for this attempt
+            stopSecurityAccess()
+            return
+        }
+
+        // Find FFmpeg executable
+        guard let ffmpegPath = Bundle.main.path(forResource: "ffmpeg", ofType: nil) else {
+            errorMessage = "Critical Error: FFmpeg executable not found in the app bundle."
+            stopSecurityAccess()
+            return
+        }
+
+        // Build the command
+        let arguments = commandBuilder.buildCommand(
+            inputURL: currentInputURL,
+            outputURL: outputURL,
+            outputFormat: outputFormat,
+            videoCodec: videoCodec,
+            videoQuality: videoQuality,
+            audioCodec: audioCodec
         )
 
-        processRunner.run(ffmpegPath: ffmpegPath, arguments: arguments, inputURL: inputURL) // Run FFmpeg process
+        // Update state before starting
+        DispatchQueue.main.async {
+            self.isConverting = true
+            self.progress = 0.0
+            print("Starting conversion: \(currentInputURL.lastPathComponent) -> \(outputURL.lastPathComponent)")
+            // Run the process (will happen on a background thread managed by ProcessRunner)
+            self.processRunner.run(ffmpegPath: ffmpegPath, arguments: arguments, inputURL: currentInputURL)
+        }
     }
-
 
     /// Cancels the currently running video conversion.
     func cancelConversion() {
-        processRunner.cancel() // Cancel FFmpeg process
-        inputURLForSecurity?.stopAccessingSecurityScopedResource() // Stop security-scoped resource access
-        inputURLForSecurity = nil  // Clear stored input URL
-        isConverting = false       // Reset conversion state
-        errorMessage = "Conversion cancelled." // Set cancellation message
+        print("Cancel requested by user.")
+        processRunner.cancel() // Ask the runner to cancel the process
+
+        // State update and cleanup happens via the delegate callback (processRunnerDidFailWithError or processRunnerDidFinish)
+        // But we can set a preliminary message and state here.
+        DispatchQueue.main.async {
+            if self.isConverting { // Only set cancelled message if it was actually running
+                 self.errorMessage = "Conversion cancelled by user."
+                 self.isConverting = false // Force immediate UI update if needed
+                 self.progress = 0.0
+                 self.stopSecurityAccess() // Ensure access is stopped on explicit cancel
+            }
+        }
+    }
+
+    // MARK: - Private Helper Methods
+
+    /// Updates the default output URL based on the current input URL and format.
+    private func updateDefaultOutputURL() {
+        guard let input = inputURL else {
+            defaultOutputURL = nil
+            return
+        }
+        // Suggest same directory, same name, new extension
+        defaultOutputURL = input.deletingPathExtension().appendingPathExtension(outputFormat)
+    }
+
+    /// Clears any existing error or success messages.
+    private func clearMessages() {
+        if errorMessage != nil || successMessage != nil {
+             DispatchQueue.main.async {
+                 self.errorMessage = nil
+                 self.successMessage = nil
+             }
+        }
+    }
+
+    /// Starts security-scoped resource access for the given URL.
+    /// Stores the URL if access is successful.
+    /// - Parameter url: The URL requiring access.
+    /// - Returns: `true` if access was successful or already active, `false` otherwise.
+    private func startSecurityAccess(url: URL) -> Bool {
+        // If we are already accessing this URL, no need to start again
+        if securityScopedInputURL == url {
+            return true
+        }
+        // Stop access to any previous URL
+        stopSecurityAccess()
+
+        // Try to start access for the new URL
+        if url.startAccessingSecurityScopedResource() {
+            securityScopedInputURL = url // Store it so we can stop later
+            print("Started security access for: \(url.lastPathComponent)")
+            return true
+        } else {
+            print("Failed to start security access for: \(url.lastPathComponent)")
+            securityScopedInputURL = nil
+            return false
+        }
+    }
+
+    /// Stops security-scoped resource access for the stored URL.
+    private func stopSecurityAccess() {
+        if let url = securityScopedInputURL {
+            url.stopAccessingSecurityScopedResource()
+            securityScopedInputURL = nil // Clear the stored URL
+            print("Stopped security access for: \(url.lastPathComponent)")
+        }
+    }
+
+    /// Common cleanup logic called after conversion finishes or fails.
+    private func conversionDidEnd() {
+        stopSecurityAccess()
+        isConverting = false
+        progress = 0.0 // Reset progress
     }
 }
-
 
 // MARK: - FFmpegProcessRunnerDelegate Extension
 
 extension VideoConverter: FFmpegProcessRunnerDelegate {
-    /// Delegate callback: Updates conversion progress.
+
+    /// Called by `FFmpegProcessRunner` when conversion progress updates.
     func processRunnerDidUpdateProgress(_ progress: Double) {
-        DispatchQueue.main.async { [weak self] in // Use [weak self] to avoid retain cycle
-            self?.progress = progress // Update progress on main thread
+        // Update happens frequently, ensure it's lightweight
+        DispatchQueue.main.async {
+            // Clamp progress between 0 and 1
+            self.progress = min(max(0.0, progress), 1.0)
         }
     }
 
-
-    /// Delegate callback: Handles FFmpeg process failure.
+    /// Called by `FFmpegProcessRunner` when the conversion process fails.
     func processRunnerDidFailWithError(_ error: String) {
-        DispatchQueue.main.async { [weak self] in // Use [weak self] to avoid retain cycle
-            self?.inputURLForSecurity?.stopAccessingSecurityScopedResource() // Stop security-scoped access
-            self?.inputURLForSecurity = nil // Clear stored input URL
-            self?.errorMessage = error       // Set error message
-            self?.isConverting = false    // Reset conversion state
+        print("Delegate received error: \(error)")
+        DispatchQueue.main.async {
+            // Check if the error is due to cancellation to avoid overwriting user message
+            if self.errorMessage == nil || !self.errorMessage!.contains("cancelled") {
+                 self.errorMessage = "Conversion Failed: \(error)"
+            }
+            self.conversionDidEnd() // Perform common cleanup
         }
     }
 
-
-    /// Delegate callback: Handles successful FFmpeg process finish.
+    /// Called by `FFmpegProcessRunner` when the conversion process finishes successfully.
     func processRunnerDidFinish() {
-        DispatchQueue.main.async { [weak self] in // Use [weak self] to avoid retain cycle
-            self?.inputURLForSecurity?.stopAccessingSecurityScopedResource() // Stop security-scoped access
-            self?.inputURLForSecurity = nil // Clear stored input URL
-            self?.isConverting = false    // Reset conversion state
+        print("Delegate received finish.")
+        DispatchQueue.main.async {
+            self.successMessage = "Conversion completed successfully!"
+            self.conversionDidEnd() // Perform common cleanup
+            // Optionally, clear the input URL after successful conversion
+             // self.inputURL = nil
         }
     }
 }
