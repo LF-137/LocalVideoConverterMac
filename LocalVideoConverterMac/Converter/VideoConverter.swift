@@ -1,24 +1,36 @@
 import Foundation
 import AVFoundation
 import AppKit
+import Combine // Import Combine for objectWillChange
 
 class VideoConverter: ObservableObject {
 
-    // MARK: - Published Properties for UI Binding
-    @Published var inputURL: URL? = nil {
+    // MARK: - Published Properties for UI Binding & Batch State
+    // @Published var fileQueue: [FileQueueItem] = [] // This publishes changes *to the array itself* (add/remove)
+    // For changes *within* elements of the array, we rely on replacing the element.
+    // If rows still don't update, we might need to manually trigger objectWillChange more often.
+    var fileQueue: [FileQueueItem] = [] {
+        willSet {
+            // This will fire if the entire array reference changes,
+            // but not always for mutations of elements within if not handled carefully.
+            // For element changes, we explicitly call objectWillChange.send() if needed.
+            // However, the common pattern is self.fileQueue[index] = newVersionOfItem
+            // which should trigger @Published correctly.
+        }
         didSet {
-            clearMessages()
-            updateDefaultOutputURL()
+             // If you assign a whole new array to fileQueue, @Published handles it.
         }
     }
-    @Published var defaultOutputURL: URL? = nil
-    @Published var isConverting = false
-    @Published var progress: Double = 0.0
-    @Published var errorMessage: String? = nil
-    @Published var successMessage: String? = nil
+    // We will manually call objectWillChange.send() before array modifications
+    // if simply replacing the element doesn't work.
+
+    @Published var isBatchConverting: Bool = false
+    @Published var overallProgressMessage: String = ""
+    @Published var globalErrorMessage: String? = nil
+    @Published var showOutputDirectorySelector: Bool = false
 
     // MARK: - Published Settings
-    @Published var outputFormat: OutputFormat = .mp4 { didSet { updateDefaultOutputURL() } }
+    @Published var outputFormat: OutputFormat = .mp4
     @Published var videoQuality: VideoQuality = .medium
     @Published var audioCodec: AudioCodec = .aac
     @Published var videoCodec: VideoCodec = .h264
@@ -26,166 +38,264 @@ class VideoConverter: ObservableObject {
     // MARK: - Private Properties
     private let commandBuilder = FFmpegCommandBuilder()
     private let processRunner = FFmpegProcessRunner()
-    private var securityScopedInputURL: URL? = nil
-    private var currentOutputURL: URL? = nil // To store the output URL during conversion
+    private var currentConvertingItemIndex: Int? = nil
+    private var selectedOutputDirectory: URL? = nil
+    
+    // To manually signal SwiftUI about changes if needed.
+    let objectWillChange = PassthroughSubject<Void, Never>()
 
-    // MARK: - Initialization
+
     init() {
         processRunner.delegate = self
-        print("VideoConverter initialized. ProcessRunner delegate set.")
+        print("VideoConverter initialized for batch processing.")
     }
 
-    // MARK: - Public Methods for UI Interaction
-    func setInputURL(_ url: URL?) {
+    // ... (addFilesToQueue, clearQueue, removeItemFromQueue, selectOutputDirectoryAndStartBatch, startBatchConversion are mostly the same) ...
+    // Ensure securityScopedInputURL is correctly passed in addFilesToQueue:
+    func addFilesToQueue(urls: [URL]) {
         DispatchQueue.main.async {
-            guard let url = url else {
-                self.inputURL = nil
+            self.objectWillChange.send() // Signal before array modification
+            self.globalErrorMessage = nil
+            let newItems = urls.map { urlWithAccess -> FileQueueItem in
+                FileQueueItem(inputURL: urlWithAccess, securityScopedInputURL: urlWithAccess)
+            }
+            self.fileQueue.append(contentsOf: newItems)
+        }
+    }
+    
+    func clearQueue() {
+        DispatchQueue.main.async {
+            self.objectWillChange.send()
+            self.cancelBatchConversion(userInitiated: false)
+            self.fileQueue.removeAll()
+            self.currentConvertingItemIndex = nil
+            self.isBatchConverting = false
+            self.overallProgressMessage = ""
+            self.globalErrorMessage = nil
+            self.selectedOutputDirectory = nil
+        }
+    }
+
+    func removeItemFromQueue(at offsets: IndexSet) {
+        DispatchQueue.main.async {
+            self.objectWillChange.send()
+            // ... (rest of removeItemFromQueue logic, ensure security scope stop) ...
+            for index in offsets.reversed() {
+                if let currentIndex = self.currentConvertingItemIndex, index == currentIndex {
+                    self.cancelCurrentConversionOnly()
+                }
+                if index < self.fileQueue.count {
+                    self.fileQueue[index].securityScopedInputURL?.stopAccessingSecurityScopedResource()
+                }
+            }
+            self.fileQueue.remove(atOffsets: offsets)
+        }
+    }
+    
+    func selectOutputDirectoryAndStartBatch() { // No objectWillChange needed here as it calls startBatchConversion
+        guard !fileQueue.isEmpty else {
+            globalErrorMessage = "No files in the queue to convert."
+            return
+        }
+        guard !isBatchConverting else {
+            globalErrorMessage = "A batch conversion is already in progress."
+            return
+        }
+
+        if let directoryURL = FileUtilities.chooseOutputDirectory() {
+            self.selectedOutputDirectory = directoryURL
+            self.startBatchConversion()
+        } else {
+            print("User cancelled output directory selection.")
+        }
+    }
+
+    private func startBatchConversion() { // No objectWillChange needed at start, but for item updates
+        guard selectedOutputDirectory != nil else {
+            globalErrorMessage = "Output directory not selected."; return
+        }
+        guard !fileQueue.isEmpty else {
+            globalErrorMessage = "Queue is empty."; isBatchConverting = false; return
+        }
+
+        DispatchQueue.main.async {
+            // self.objectWillChange.send() // Not for these top-level @Published vars
+            self.isBatchConverting = true
+            self.globalErrorMessage = nil
+            
+            // Manually signal for array content reset if simple assignment doesn't update UI
+            self.objectWillChange.send()
+            for i in self.fileQueue.indices {
+                if self.fileQueue[i].status != .pending && self.fileQueue[i].status != .converting && self.fileQueue[i].status != .preparing {
+                    self.fileQueue[i].status = .pending
+                    self.fileQueue[i].progress = 0.0
+                    self.fileQueue[i].errorMessage = nil
+                    self.fileQueue[i].successMessage = nil
+                }
+            }
+            self.processNextItemInQueue()
+        }
+    }
+
+
+    // In processNextItemInQueue, before self.fileQueue[nextItemIndex] = item
+    private func processNextItemInQueue() {
+        DispatchQueue.main.async {
+            // Stop security access for the previously converting item, if any and if it's truly done
+            if let prevIndex = self.currentConvertingItemIndex, prevIndex < self.fileQueue.count {
+                let prevItem = self.fileQueue[prevIndex]
+                if prevItem.status != .converting && prevItem.status != .preparing { // Only stop if not actively being worked on
+                    prevItem.securityScopedInputURL?.stopAccessingSecurityScopedResource()
+                    // No need to nil out self.fileQueue[prevIndex].securityScopedInputURL, it's part of the item's data
+                }
+            }
+            self.currentConvertingItemIndex = nil // Reset before finding the next one
+
+            // Find the actual next item index
+            guard let actualNextItemIndex = self.fileQueue.firstIndex(where: { $0.status == .pending }) else {
+                self.overallProgressMessage = "Batch completed."
+                self.isBatchConverting = false
+                self.selectedOutputDirectory = nil // Clear after batch is done
+                self.objectWillChange.send() // Send change for overallProgressMessage and isBatchConverting
+                print("No more pending items in queue.")
                 return
             }
-            if FileUtilities.isVideoFile(url) {
-                self.inputURL = url
-            } else {
-                self.inputURL = nil
-                self.errorMessage = "'\(url.lastPathComponent)' is not recognized as a valid video file."
+
+            // Now, use 'actualNextItemIndex' throughout this processing block
+            self.currentConvertingItemIndex = actualNextItemIndex
+            
+            self.objectWillChange.send() // Signal change before updating item in array
+            var currentItem = self.fileQueue[actualNextItemIndex] // Make a mutable copy using the correct index
+            currentItem.status = .preparing
+            self.fileQueue[actualNextItemIndex] = currentItem // Assign back to trigger UI
+
+            let completedCount = self.fileQueue.filter { $0.status == .completed }.count
+            self.overallProgressMessage = "Preparing \(currentItem.inputURL.lastPathComponent) (\(completedCount + 1) of \(self.fileQueue.count))"
+            self.objectWillChange.send() // For overallProgressMessage update
+
+            // Use currentItem for its properties from here
+            guard let currentItemScopedURL = currentItem.securityScopedInputURL, currentItemScopedURL.startAccessingSecurityScopedResource() else {
+                print("Failed to get security access for \(currentItem.inputURL.lastPathComponent)")
+                // Use actualNextItemIndex for updateItemStatus
+                self.updateItemStatus(at: actualNextItemIndex, status: .failed, errorMessage: "Could not access input file. Please re-add it.")
+                self.processNextItemInQueue() // Try next one
+                return
+            }
+
+            guard let outputDir = self.selectedOutputDirectory else {
+                self.updateItemStatus(at: actualNextItemIndex, status: .failed, errorMessage: "Output directory is missing.")
+                currentItemScopedURL.stopAccessingSecurityScopedResource() // Stop access since we are failing
+                self.processNextItemInQueue()
+                return
+            }
+
+            let outputFilename = currentItem.inputURL.deletingPathExtension().lastPathComponent
+            let outputFileURL = outputDir.appendingPathComponent(outputFilename).appendingPathExtension(self.outputFormat.rawValue)
+            
+            self.objectWillChange.send() // Signal change before updating item in array for outputURL
+            currentItem.outputURL = outputFileURL // Update the mutable copy
+            self.fileQueue[actualNextItemIndex] = currentItem // Assign back
+
+            if FileManager.default.fileExists(atPath: outputFileURL.path) {
+                 print("Output file \(outputFileURL.lastPathComponent) exists. FFmpeg will overwrite.")
+            }
+
+            guard let ffmpegPath = Bundle.main.path(forResource: "ffmpeg", ofType: nil) else {
+                self.updateItemStatus(at: actualNextItemIndex, status: .failed, errorMessage: "FFmpeg not found.")
+                currentItemScopedURL.stopAccessingSecurityScopedResource() // Stop access
+                self.processNextItemInQueue()
+                return
+            }
+
+            let arguments = self.commandBuilder.buildCommand(
+                inputURL: currentItem.inputURL, // Use original inputURL from the item for ffmpeg
+                outputURL: outputFileURL,
+                outputFormat: self.outputFormat,
+                videoCodec: self.videoCodec,
+                videoQuality: self.videoQuality,
+                audioCodec: self.audioCodec
+            )
+
+            // Update status to converting *before* running the process
+            // Use actualNextItemIndex for updateItemStatus
+            self.updateItemStatus(at: actualNextItemIndex, status: .converting, progress: 0.0)
+            let totalCompletedNow = self.fileQueue.filter({$0.status == .completed}).count
+            // This item is now being processed, so it's effectively the (totalCompletedNow + 1)-th item in sequence of processing
+            let processingNumber = totalCompletedNow + 1
+            self.overallProgressMessage = "Converting \(currentItem.inputURL.lastPathComponent) (\(processingNumber) of \(self.fileQueue.count))"
+            self.objectWillChange.send() // For overallProgressMessage update
+
+            // Pass currentItem.inputURL (the original non-scoped URL) to ffmpeg runner
+            self.processRunner.run(ffmpegPath: ffmpegPath, arguments: arguments, inputURL: currentItem.inputURL)
+        }
+    }
+    
+    func cancelBatchConversion(userInitiated: Bool = true) {
+        DispatchQueue.main.async {
+            self.objectWillChange.send() // Signal change before modifying queue
+            // ... (rest of cancelBatchConversion logic) ...
+            if !self.isBatchConverting && self.currentConvertingItemIndex == nil {
+                for i in self.fileQueue.indices where self.fileQueue[i].status == .pending {
+                    self.fileQueue[i].securityScopedInputURL?.stopAccessingSecurityScopedResource()
+                    if userInitiated { self.fileQueue[i].status = .cancelled }
+                }
+                if userInitiated { self.overallProgressMessage = "Batch cancelled." }
+                return
+            }
+
+            self.isBatchConverting = false
+            if let currentIndex = self.currentConvertingItemIndex, currentIndex < self.fileQueue.count {
+                self.processRunner.cancel()
+                // Delegate call will update status, but also set explicitly here for immediate UI feedback
+                self.fileQueue[currentIndex].status = .cancelled
+                self.fileQueue[currentIndex].errorMessage = userInitiated ? "Cancelled by user" : self.fileQueue[currentIndex].errorMessage
+                self.fileQueue[currentIndex].securityScopedInputURL?.stopAccessingSecurityScopedResource()
+            }
+            for i in self.fileQueue.indices {
+                if self.fileQueue[i].status == .pending || self.fileQueue[i].status == .preparing {
+                    self.fileQueue[i].status = .cancelled
+                    self.fileQueue[i].securityScopedInputURL?.stopAccessingSecurityScopedResource()
+                }
+            }
+            self.currentConvertingItemIndex = nil
+            if userInitiated { self.overallProgressMessage = "Batch cancelled." }
+        }
+    }
+
+    private func cancelCurrentConversionOnly() {
+        DispatchQueue.main.async {
+             if let currentIndex = self.currentConvertingItemIndex,
+               currentIndex < self.fileQueue.count,
+               (self.fileQueue[currentIndex].status == .converting || self.fileQueue[currentIndex].status == .preparing) {
+                self.objectWillChange.send() // Signal before changing item status
+                self.processRunner.cancel() // This will trigger delegate methods
+                self.fileQueue[currentIndex].status = .cancelled // Update status immediately
+                self.fileQueue[currentIndex].errorMessage = "Cancelled by user"
+                // Delegate method will handle stopping security scope and calling processNext
             }
         }
     }
 
-    func clearInput() {
+
+    // This is the main function for updating an item's state and triggering UI refresh
+    private func updateItemStatus(at index: Int, status: ConversionStatus, progress: Double? = nil, errorMessage: String? = nil, successMessage: String? = nil) {
+        guard index >= 0 && index < fileQueue.count else {
+            print("Error: Attempted to update item at invalid index \(index). Queue count: \(fileQueue.count)")
+            return
+        }
         DispatchQueue.main.async {
-            self.stopSecurityAccess()
-            self.inputURL = nil
-            self.currentOutputURL = nil // Clear stored output URL as well
-            self.clearMessages()
-            print("Input cleared.")
+            self.objectWillChange.send() // Explicitly tell SwiftUI something is about to change
+
+            var itemToUpdate = self.fileQueue[index]
+            itemToUpdate.status = status
+            if let progressVal = progress { itemToUpdate.progress = progressVal }
+            
+            // Clear previous messages if not providing new ones for that type
+            itemToUpdate.errorMessage = (status == .failed || status == .cancelled) ? errorMessage : nil
+            itemToUpdate.successMessage = (status == .completed) ? successMessage : nil
+            
+            self.fileQueue[index] = itemToUpdate // Replace the item in the array
         }
-    }
-
-    func startConversion() {
-        clearMessages()
-
-        guard let currentInputURL = inputURL else {
-            errorMessage = "No input video selected."
-            return
-        }
-
-        guard startSecurityAccess(url: currentInputURL) else {
-            errorMessage = "Could not get permission to access the input video file. Please select it again."
-            return
-        }
-
-        guard let chosenOutputURL = FileUtilities.chooseOutputURL(defaultURL: defaultOutputURL ?? currentInputURL, selectedFormat: outputFormat.rawValue) else {
-            print("User cancelled output selection.")
-            stopSecurityAccess() // Stop access if we started it for this attempt
-            return
-        }
-        self.currentOutputURL = chosenOutputURL // Store the chosen output URL
-
-        guard let ffmpegPath = Bundle.main.path(forResource: "ffmpeg", ofType: nil) else {
-            errorMessage = "Critical Error: FFmpeg executable not found in the app bundle."
-            self.currentOutputURL = nil // Clear if we can't proceed
-            stopSecurityAccess()
-            return
-        }
-
-        let arguments = commandBuilder.buildCommand(
-            inputURL: currentInputURL,
-            outputURL: chosenOutputURL, // Use the chosen output URL
-            outputFormat: outputFormat,
-            videoCodec: videoCodec,
-            videoQuality: videoQuality,
-            audioCodec: audioCodec
-        )
-
-        DispatchQueue.main.async {
-            self.isConverting = true
-            self.progress = 0.0
-            print("Starting conversion: \(currentInputURL.lastPathComponent) -> \(chosenOutputURL.lastPathComponent)")
-            self.processRunner.run(ffmpegPath: ffmpegPath, arguments: arguments, inputURL: currentInputURL)
-        }
-    }
-
-    func cancelConversion() {
-        print("Cancel requested by user.")
-        processRunner.cancel()
-
-        DispatchQueue.main.async {
-            if self.isConverting {
-                 self.errorMessage = "Conversion cancelled by user."
-                 // Let conversionDidEnd handle state changes, called by the delegate
-            }
-        }
-    }
-
-    // MARK: - Private Helper Methods
-    private func updateDefaultOutputURL() {
-        guard let input = inputURL else {
-            defaultOutputURL = nil
-            return
-        }
-        defaultOutputURL = input.deletingPathExtension().appendingPathExtension(outputFormat.rawValue)
-    }
-
-    private func clearMessages() {
-        if errorMessage != nil || successMessage != nil {
-             DispatchQueue.main.async {
-                 self.errorMessage = nil
-                 self.successMessage = nil
-             }
-        }
-    }
-
-    private func startSecurityAccess(url: URL) -> Bool {
-        if securityScopedInputURL == url {
-            // Already accessing, or it's the same URL and startAccessingSecurityScopedResource is idempotent
-            // Check if we can still access it (e.g., bookmark not stale)
-            // For simplicity, we re-attempt if it's not literally the same securityScopedInputURL instance
-            // or if we don't have one.
-            if url.startAccessingSecurityScopedResource() {
-                 if securityScopedInputURL != url { // If it was a different URL before or nil
-                     // Stop previous one if any
-                     securityScopedInputURL?.stopAccessingSecurityScopedResource()
-                     securityScopedInputURL = url
-                 }
-                 print("Security access confirmed/re-established for: \(url.lastPathComponent)")
-                 return true
-            } else {
-                 print("Failed to re-establish security access for: \(url.lastPathComponent)")
-                 securityScopedInputURL = nil // Clear if access failed
-                 return false
-            }
-        }
-        
-        // Stop access to any previous URL if it's different
-        stopSecurityAccess()
-
-        if url.startAccessingSecurityScopedResource() {
-            securityScopedInputURL = url
-            print("Started security access for: \(url.lastPathComponent)")
-            return true
-        } else {
-            print("Failed to start security access for: \(url.lastPathComponent)")
-            securityScopedInputURL = nil
-            return false
-        }
-    }
-
-    private func stopSecurityAccess() {
-        if let url = securityScopedInputURL {
-            url.stopAccessingSecurityScopedResource()
-            securityScopedInputURL = nil
-            print("Stopped security access for: \(url.lastPathComponent)")
-        }
-    }
-
-    private func conversionDidEnd() {
-        stopSecurityAccess() // This handles the input file's security scope
-        // Output file (currentOutputURL) doesn't need explicit security scope stopping
-        // as it was created by the app in a user-chosen location.
-        isConverting = false
-        progress = 0.0
-        // Don't clear currentOutputURL here, as processRunnerDidFinish might still need it briefly
-        // It will be cleared on next clearInput or new conversion start.
     }
 }
 
@@ -193,62 +303,82 @@ class VideoConverter: ObservableObject {
 extension VideoConverter: FFmpegProcessRunnerDelegate {
 
     func processRunnerDidUpdateProgress(_ progress: Double) {
-        DispatchQueue.main.async {
-            self.progress = min(max(0.0, progress), 1.0)
-        }
+        guard let currentIndex = currentConvertingItemIndex, currentIndex < fileQueue.count else { return }
+        // updateItemStatus will call objectWillChange.send()
+        updateItemStatus(at: currentIndex, status: .converting, progress: progress)
     }
 
     func processRunnerDidFailWithError(_ error: String) {
-        print("Delegate received error: \(error)")
-        DispatchQueue.main.async {
-            // Check if the error is due to cancellation to avoid overwriting user message
-            // This check is tricky if cancelConversion sets the message first.
-            // The delegate might arrive slightly later.
-            if self.errorMessage == nil || !self.errorMessage!.contains("cancelled by user") {
-                 self.errorMessage = "Conversion Failed: \(error)"
-            }
-            self.conversionDidEnd()
-            self.currentOutputURL = nil // Clear after failure
+        guard let currentIndex = currentConvertingItemIndex, currentIndex < fileQueue.count else {
+            print("Delegate error but no current item: \(error)")
+            if isBatchConverting { processNextItemInQueue() }
+            return
+        }
+
+        let isUserCancel = (error.lowercased().contains("cancelled") || error.lowercased().contains("operation cancelled"))
+        let finalStatus: ConversionStatus = isUserCancel ? .cancelled : .failed
+        // If user cancelled, use existing item.errorMessage (set by cancelCurrentConversionOnly) or a default
+        let finalMessage = isUserCancel ? (self.fileQueue[currentIndex].errorMessage ?? "Cancelled") : "Conversion Failed: \(error)"
+        
+        updateItemStatus(at: currentIndex, status: finalStatus, errorMessage: finalMessage)
+        self.fileQueue[currentIndex].securityScopedInputURL?.stopAccessingSecurityScopedResource()
+
+        if isBatchConverting {
+            processNextItemInQueue()
+        } else {
+            self.currentConvertingItemIndex = nil
+            self.overallProgressMessage = "Batch stopped."
         }
     }
 
     func processRunnerDidFinish() {
-        print("Delegate received finish.")
-        DispatchQueue.main.async {
-            var mainMessage = "Conversion completed successfully!"
-            var compressionInfo = ""
+        guard let currentIndex = currentConvertingItemIndex, currentIndex < fileQueue.count else {
+            print("Delegate finish but no current item.")
+            if isBatchConverting { processNextItemInQueue() }
+            return
+        }
+        let item = fileQueue[currentIndex] // Get a non-mutable copy for reading
+        var finalSuccessMessage = "Completed: \(item.outputURL?.lastPathComponent ?? "File")"
+        var compressionInfo = ""
 
-            if let originalURL = self.inputURL, let outputURL = self.currentOutputURL {
-                mainMessage = "Converted: \(outputURL.lastPathComponent)" // More specific success
+        let originalURL = item.inputURL
+        if let outputURL = item.outputURL {
+            var originalSizeValue: Int64?
+            var couldAccessInputForSize = false
 
-                if let originalSize = FileUtilities.getFileSize(url: originalURL),
-                   let newSize = FileUtilities.getFileSize(url: outputURL) {
-
-                    let formattedOriginalSize = FileUtilities.formatBytes(originalSize)
-                    let formattedNewSize = FileUtilities.formatBytes(newSize)
-                    compressionInfo += "\nOriginal: \(formattedOriginalSize), New: \(formattedNewSize)."
-
-                    if originalSize > 0 { // Avoid division by zero
-                        if newSize < originalSize {
-                            let percentageSmaller = (Double(originalSize - newSize) / Double(originalSize)) * 100.0
-                            compressionInfo += String(format: " Reduced by %.1f%%.", percentageSmaller)
-                        } else if newSize > originalSize {
-                            let percentageLarger = (Double(newSize - originalSize) / Double(originalSize)) * 100.0
-                            compressionInfo += String(format: " Increased by %.1f%%.", percentageLarger)
-                        } else {
-                            compressionInfo += " File size is the same."
-                        }
-                    }
-                } else {
-                    compressionInfo += "\nCould not determine file sizes for compression info."
-                }
+            if let scopedURL = item.securityScopedInputURL, scopedURL.startAccessingSecurityScopedResource() {
+                originalSizeValue = FileUtilities.getFileSize(url: originalURL)
+                scopedURL.stopAccessingSecurityScopedResource()
+                couldAccessInputForSize = originalSizeValue != nil
             }
+            if !couldAccessInputForSize {
+                 print("Could not use securityScopedInputURL for size check of \(originalURL.lastPathComponent). Attempting direct (might fail).")
+                 originalSizeValue = FileUtilities.getFileSize(url: originalURL)
+            }
+            let newSize = FileUtilities.getFileSize(url: outputURL)
 
-            self.successMessage = mainMessage + compressionInfo
-            self.conversionDidEnd()
-            // Optionally clear input after success:
-            // self.inputURL = nil // This would also clear defaultOutputURL
-            // self.currentOutputURL = nil // Clear after use
+            if let oSize = originalSizeValue, let nSize = newSize {
+                let fOSize = FileUtilities.formatBytes(oSize); let fNSize = FileUtilities.formatBytes(nSize)
+                compressionInfo += "\nOriginal: \(fOSize), New: \(fNSize)."
+                if oSize > 0 {
+                    if nSize < oSize { compressionInfo += String(format: " Reduced by %.1f%%.", (Double(oSize - nSize)/Double(oSize))*100) }
+                    else if nSize > oSize { compressionInfo += String(format: " Increased by %.1f%%.", (Double(nSize-oSize)/Double(oSize))*100) }
+                    else { compressionInfo += " File size is the same." }
+                }
+            } else {
+                compressionInfo += "\nSizes: Orig(\(originalSizeValue != nil ? "✓" : "x")) New(\(newSize != nil ? "✓" : "x"))"
+            }
+        } else { compressionInfo += "\nOutput URL not found." }
+        finalSuccessMessage += compressionInfo
+        
+        updateItemStatus(at: currentIndex, status: .completed, successMessage: finalSuccessMessage)
+        self.fileQueue[currentIndex].securityScopedInputURL?.stopAccessingSecurityScopedResource()
+
+        if isBatchConverting {
+            processNextItemInQueue()
+        } else {
+            self.currentConvertingItemIndex = nil
+            self.overallProgressMessage = "Batch stopped."
         }
     }
 }
