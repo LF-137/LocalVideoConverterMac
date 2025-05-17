@@ -52,12 +52,27 @@ class VideoConverter: ObservableObject {
 
     // ... (addFilesToQueue, clearQueue, removeItemFromQueue, selectOutputDirectoryAndStartBatch, startBatchConversion are mostly the same) ...
     // Ensure securityScopedInputURL is correctly passed in addFilesToQueue:
-    func addFilesToQueue(urls: [URL]) {
+    func addFilesToQueue(urls: [URL], accessAlreadyStarted: Bool = false) { // Added accessAlreadyStarted with a default
         DispatchQueue.main.async {
             self.objectWillChange.send() // Signal before array modification
             self.globalErrorMessage = nil
-            let newItems = urls.map { urlWithAccess -> FileQueueItem in
-                FileQueueItem(inputURL: urlWithAccess, securityScopedInputURL: urlWithAccess)
+            let newItems = urls.compactMap { url -> FileQueueItem? in
+                var itemScopedURL = url // This will be the URL stored for security scope management
+
+                if !accessAlreadyStarted {
+                    // This path would be taken if access wasn't started by the caller.
+                    // For files from "Add Files" button, FileUtilities.selectFiles *does* start access,
+                    // so 'accessAlreadyStarted' should be true.
+                    // If for some reason access wasn't started, we attempt it here.
+                    if !url.startAccessingSecurityScopedResource() {
+                        print("AddFilesToQueue: Failed to start security access for \(url.lastPathComponent) when accessAlreadyStarted was false. It might fail during conversion.")
+                        // We might still add it, but it's unlikely to work if access couldn't be started.
+                        // Or, you could choose to not add it: return nil
+                    }
+                    // If the above call succeeded, itemScopedURL (which is 'url') now has access.
+                }
+                // If accessAlreadyStarted is true, we assume 'url' (passed as itemScopedURL) already has access.
+                return FileQueueItem(inputURL: url, securityScopedInputURL: itemScopedURL)
             }
             self.fileQueue.append(contentsOf: newItems)
         }
