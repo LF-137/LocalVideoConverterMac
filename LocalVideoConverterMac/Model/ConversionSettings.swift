@@ -1,6 +1,7 @@
 import Foundation
 
 // MARK: - Enums
+// We ensure RawRepresentable (String) is used so @AppStorage works automatically
 
 enum ConversionMode: String, CaseIterable, Identifiable {
     case videoConversion = "Convert Video"
@@ -52,7 +53,7 @@ enum AudioCodec: String, CaseIterable, Identifiable {
 
 enum ConversionStatus: String, CaseIterable {
     case pending = "Pending"
-    case analyzing = "Analyzing..." // New status
+    case analyzing = "Analyzing..."
     case preparing = "Preparing"
     case converting = "Processing"
     case completed = "Completed"
