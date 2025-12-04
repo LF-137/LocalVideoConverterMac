@@ -1,130 +1,103 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @StateObject private var converter = VideoConverter()
-    // @State private var isDragging = false // No longer needed
     @State private var showSettings = false
 
     var body: some View {
-        VStack(spacing: 15) {
-            // MARK: - Settings and Global Messages
+        VStack(spacing: 0) {
+            
+            // MARK: - Header
             HStack {
-                Text("Batch Video Converter")
-                    .font(.title2)
+                Text("Video Converter")
+                    .font(.headline)
                 Spacer()
                 Button { showSettings = true } label: {
-                    Label("Settings", systemImage: "gear")
+                    Label("Settings", systemImage: "gearshape")
                 }
-                .help("Open conversion settings (applied to all files in batch)")
             }
-            .padding(.horizontal)
+            .padding()
+            .background(Color(NSColor.controlBackgroundColor))
 
-            if let globalError = converter.globalErrorMessage {
-                Text(globalError)
-                    .foregroundColor(.red)
-                    .padding(.horizontal)
-            }
-
-            // MARK: - File Queue List
-            if converter.fileQueue.isEmpty {
-                // Display a message when the queue is empty, instead of the drop zone
-                VStack {
-                    Spacer() // Pushes content to center
-                    Image(systemName: "doc.on.doc") // Example icon
-                        .font(.system(size: 50))
-                        .foregroundColor(.gray)
-                        .padding(.bottom, 5)
-                    Text("No files in queue.")
-                        .font(.title3)
-                        .foregroundColor(.gray)
-                    Text("Click 'Add Files' to select videos for conversion.")
-                        .font(.callout)
-                        .foregroundColor(.gray)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal)
-                    Spacer() // Pushes content to center
-                }
-                .frame(minHeight: 150, idealHeight: 250) // Give it some space
-                .padding(.horizontal)
-
-            } else {
-                List {
-                    ForEach(converter.fileQueue) { item in
-                        FileQueueRow(item: item)
+            // MARK: - Main Area (Queue or Empty State)
+            ZStack {
+                if converter.fileQueue.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: "arrow.down.doc")
+                            .font(.system(size: 40))
+                            .foregroundColor(.secondary)
+                        Text("Drag & Drop videos here")
+                            .font(.title3)
+                            .foregroundColor(.secondary)
+                        Text("or click Add Files below")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
                     }
-                    .onDelete(perform: converter.removeItemFromQueue)
-                }
-                .frame(minHeight: 200, idealHeight: 300)
-            }
-
-            // MARK: - Action Buttons
-            HStack {
-                Button {
-                    FileUtilities.selectFiles { urls in
-                        if let urls = urls, !urls.isEmpty { // Ensure urls is not nil AND not empty
-                            // VideoConverter's addFilesToQueue will handle starting access
-                            converter.addFilesToQueue(urls: urls, accessAlreadyStarted: true)
-                            // accessAlreadyStarted: true because FileUtilities.selectFiles now starts access.
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List {
+                        ForEach(converter.fileQueue) { item in
+                            FileQueueRow(item: item)
                         }
+                        .onDelete(perform: converter.removeItems)
                     }
-                } label: {
-                    Label("Add Files", systemImage: "plus.circle.fill")
-                        .padding(.horizontal)
                 }
-                .disabled(converter.isBatchConverting)
+            }
+            .frame(minWidth: 500, minHeight: 300)
+            .onDrop(of: [.fileURL], delegate: VideoDropDelegate(converter: converter))
+            
+            Divider()
 
+            // MARK: - Footer Controls
+            VStack(spacing: 12) {
+                if let error = converter.globalErrorMessage {
+                    Text(error).foregroundColor(.red).font(.caption)
+                }
+                
+                if !converter.overallProgressMessage.isEmpty {
+                    Text(converter.overallProgressMessage)
+                        .font(.caption)
+                        .monospacedDigit()
+                }
 
-                if !converter.fileQueue.isEmpty {
+                HStack {
                     Button {
-                        converter.clearQueue()
+                        FileUtilities.selectFiles { urls in
+                            if let urls = urls { converter.addFiles(urls: urls) }
+                        }
                     } label: {
-                        Label("Clear Queue", systemImage: "trash")
-                            .padding(.horizontal)
+                        Label("Add Files", systemImage: "plus")
                     }
                     .disabled(converter.isBatchConverting)
-                    .foregroundColor(.red)
+                    
+                    if !converter.fileQueue.isEmpty {
+                        Button("Clear") { converter.clearQueue() }
+                        .disabled(converter.isBatchConverting)
+                    }
+
+                    Spacer()
+
+                    if converter.isBatchConverting {
+                        Button(role: .destructive) {
+                            converter.cancelBatch()
+                        } label: {
+                            Text("Cancel Batch")
+                        }
+                    } else {
+                        Button {
+                            converter.startBatch()
+                        } label: {
+                            Text("Start Conversion")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(converter.fileQueue.isEmpty)
+                    }
                 }
             }
-            .padding(.horizontal)
-
-
-            Text(converter.overallProgressMessage)
-                .font(.caption)
-                .frame(height: 20)
-                .padding(.horizontal)
-
-
-            // MARK: - Convert / Cancel Batch Button
-            if !converter.fileQueue.isEmpty {
-                if converter.isBatchConverting {
-                    Button {
-                        converter.cancelBatchConversion()
-                    } label: {
-                        Label("Cancel Batch", systemImage: "xmark.octagon.fill")
-                            .padding()
-                            .frame(maxWidth: .infinity)
-                            .background(Color.red)
-                            .foregroundColor(.white)
-                            .cornerRadius(10)
-                    }
-                } else {
-                    Button {
-                        converter.selectOutputDirectoryAndStartBatch()
-                    } label: {
-                        Label("Convert All (\(converter.fileQueue.count))", systemImage: "film.stack")
-                            .padding()
-                            .frame(maxWidth: .infinity)
-                            .background(Color.green)
-                            .foregroundColor(.white)
-                            .cornerRadius(10)
-                    }
-                    // Disable if no files are in a state to be converted
-                    .disabled(converter.fileQueue.allSatisfy { $0.status == .completed || $0.status == .skipped })
-                }
-            }
-            Spacer()
+            .padding()
+            .background(Color(NSColor.controlBackgroundColor))
         }
-        .padding()
         .sheet(isPresented: $showSettings) {
             SettingsView(
                 outputFormat: $converter.outputFormat,
@@ -133,94 +106,75 @@ struct ContentView: View {
                 videoCodec: $converter.videoCodec
             )
         }
-        // REMOVED: .onDrop modifier and related DropAreaView if it was solely for drag-and-drop.
-        // If DropAreaView had other UI purposes, you might keep its visual structure but remove .onDrop.
-        // For simplicity, I've removed the direct DropAreaView call assuming its primary role was dropping.
     }
-
-    // REMOVED: private func handleDrop(providers: [NSItemProvider])
-    // as it's no longer used.
 }
 
-// If DropAreaView was defined in ContentView.swift and only used for drag-and-drop,
-// you can remove its definition as well.
-// struct DropAreaView: View { ... } // REMOVE IF ONLY FOR DRAG-DROP
-
-// FileQueueRow remains the same
-struct FileQueueRow: View {
-    let item: FileQueueItem
-
-    var body: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(item.inputURL.lastPathComponent)
-                    .font(.headline)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-
-                if item.status == .converting {
-                    HStack {
-                        ProgressView(value: item.progress)
-                            .progressViewStyle(LinearProgressViewStyle())
-                        Text(String(format: "%.0f%%", item.progress * 100))
-                            .font(.caption)
-                            .frame(width: 40, alignment: .trailing)
+// MARK: - Drag & Drop Delegate
+struct VideoDropDelegate: DropDelegate {
+    var converter: VideoConverter
+    
+    func performDrop(info: DropInfo) -> Bool {
+        let providers = info.itemProviders(for: [.fileURL])
+        var urls: [URL] = []
+        let group = DispatchGroup()
+        
+        for provider in providers {
+            group.enter()
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { (data, error) in
+                defer { group.leave() }
+                if let urlData = data as? Data,
+                   let url = URL(dataRepresentation: urlData, relativeTo: nil) {
+                    if FileUtilities.isVideoFile(url) {
+                        urls.append(url)
                     }
-                } else if item.status == .completed {
-                    if let successMsg = item.successMessage {
-                        Text(successMsg.replacingOccurrences(of: "\n", with: " "))
-                            .font(.caption)
-                            .foregroundColor(statusColor(item.status))
-                            .lineLimit(2)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } else {
-                        Text("Status: \(item.status.displayName)")
-                            .font(.caption)
-                            .foregroundColor(statusColor(item.status))
-                    }
-                } else {
-                    Text("Status: \(item.status.displayName)")
-                        .font(.caption)
-                        .foregroundColor(statusColor(item.status))
-                }
-
-                if let errorMessage = item.errorMessage, item.status == .failed || item.status == .cancelled {
-                    Text(errorMessage)
-                        .font(.caption2)
-                        .foregroundColor(.red)
-                        .lineLimit(2)
                 }
             }
-            Spacer()
-            statusIcon(for: item.status)
         }
-        .padding(.vertical, 6)
-    }
-
-    @ViewBuilder
-    private func statusIcon(for status: ConversionStatus) -> some View {
-        switch status {
-        case .converting: ProgressView().scaleEffect(0.7)
-        case .completed: Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
-        case .failed, .cancelled: Image(systemName: "xmark.circle.fill").foregroundColor(.red)
-        default: EmptyView()
+        
+        group.notify(queue: .main) {
+            converter.addFiles(urls: urls)
         }
-    }
-
-    private func statusColor(_ status: ConversionStatus) -> Color {
-        switch status {
-        case .pending: return .gray
-        case .preparing: return .orange
-        case .converting: return .blue
-        case .completed: return .green
-        case .failed, .cancelled: return .red
-        case .skipped: return .purple
-        }
+        return true
     }
 }
 
-struct ContentView_Previews: PreviewProvider {
-    static var previews: some View {
-        ContentView()
+// MARK: - Row View
+struct FileQueueRow: View {
+    let item: FileQueueItem
+    
+    var body: some View {
+        HStack {
+            VStack(alignment: .leading) {
+                Text(item.inputURL.lastPathComponent)
+                    .font(.headline)
+                    .truncationMode(.middle)
+                    .lineLimit(1)
+                
+                if let msg = item.successMessage {
+                    Text(msg).font(.caption).foregroundColor(.green)
+                } else if let err = item.errorMessage {
+                    Text(err).font(.caption).foregroundColor(.red)
+                } else {
+                    Text(item.status.displayName).font(.caption).foregroundColor(.secondary)
+                }
+            }
+            
+            Spacer()
+            
+            if item.status == .converting {
+                ProgressView(value: item.progress)
+                    .progressViewStyle(.linear)
+                    .frame(width: 100)
+                Text("\(Int(item.progress * 100))%")
+                    .font(.caption)
+                    .monospacedDigit()
+                    .frame(width: 35, alignment: .trailing)
+            } else if item.status == .completed {
+                Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+            } else if item.status == .failed {
+                Image(systemName: "exclamationmark.circle.fill").foregroundColor(.red)
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
