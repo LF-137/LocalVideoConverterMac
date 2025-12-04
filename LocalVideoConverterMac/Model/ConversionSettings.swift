@@ -2,8 +2,21 @@ import Foundation
 
 // MARK: - Enums
 
+enum ConversionMode: String, CaseIterable, Identifiable {
+    case videoConversion = "Convert Video"
+    case audioExtraction = "Extract Audio"
+    var id: String { self.rawValue }
+}
+
+enum AudioExportFormat: String, CaseIterable, Identifiable {
+    case mp3, aac, wav, flac
+    var id: String { self.rawValue }
+    var displayName: String { self.rawValue.uppercased() }
+    var extensionName: String { self.rawValue }
+}
+
 enum OutputFormat: String, CaseIterable, Identifiable {
-    case mp4, mov
+    case mp4, mov, mkv
     var id: String { self.rawValue }
     var displayName: String { self.rawValue.uppercased() }
 }
@@ -39,36 +52,57 @@ enum AudioCodec: String, CaseIterable, Identifiable {
 
 enum ConversionStatus: String, CaseIterable {
     case pending = "Pending"
+    case analyzing = "Analyzing..." // New status
     case preparing = "Preparing"
-    case converting = "Converting"
+    case converting = "Processing"
     case completed = "Completed"
     case failed = "Failed"
     case cancelled = "Cancelled"
-    case skipped = "Skipped"
-
+    
     var displayName: String { self.rawValue }
 }
 
 // MARK: - Data Models
 
+struct AudioTrackInfo: Identifiable, Equatable {
+    let id = UUID()
+    let index: Int // The index in FFmpeg (0:a:0, 0:a:1)
+    var language: String
+    var title: String
+    
+    // UI State for Extraction
+    var isSelected: Bool = false
+    var customName: String = "" // User defined output filename
+}
+
 struct FileQueueItem: Identifiable, Equatable {
     let id = UUID()
     let inputURL: URL
-    var outputURL: URL?
-    
-    // Security scoped URL must be held to maintain access privileges
+    var outputURL: URL? // Used for video conversion
     var securityScopedInputURL: URL?
     
     var status: ConversionStatus = .pending
     var progress: Double = 0.0
     var errorMessage: String?
     var successMessage: String?
+    
+    // Audio Extraction Specifics
+    var audioTracks: [AudioTrackInfo] = []
+    var mergeSelectedTracks: Bool = false
+    var mergedTrackName: String = ""
+    
+    // Helper to see if any work is selected
+    var hasWorkToDo: Bool {
+        return audioTracks.contains(where: { $0.isSelected }) || mergeSelectedTracks
+    }
 
     static func == (lhs: FileQueueItem, rhs: FileQueueItem) -> Bool {
         return lhs.id == rhs.id &&
                lhs.status == rhs.status &&
                lhs.progress == rhs.progress &&
                lhs.errorMessage == rhs.errorMessage &&
-               lhs.successMessage == rhs.successMessage
+               lhs.successMessage == rhs.successMessage &&
+               lhs.audioTracks == rhs.audioTracks &&
+               lhs.mergeSelectedTracks == rhs.mergeSelectedTracks
     }
 }

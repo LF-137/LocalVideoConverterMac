@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import AVFoundation
 
 @MainActor
 class VideoConverter: ObservableObject {
@@ -10,20 +11,29 @@ class VideoConverter: ObservableObject {
     @Published var overallProgressMessage: String = ""
     @Published var globalErrorMessage: String? = nil
     
+    // Mode
+    @Published var mode: ConversionMode = .videoConversion
+    
     // Settings
     @Published var outputFormat: OutputFormat = .mp4
     @Published var videoQuality: VideoQuality = .medium
     @Published var audioCodec: AudioCodec = .aac
     @Published var videoCodec: VideoCodec = .h264
+    
+    // Audio Settings
+    @Published var audioExportFormat: AudioExportFormat = .mp3
 
     // MARK: - Internal State
     private let commandBuilder = FFmpegCommandBuilder()
     private let processRunner = FFmpegProcessRunner()
     private var currentItemIndex: Int? = nil
     private var outputDirectory: URL? = nil
-    
-    // NEW: Variable to track start time
     private var currentItemStartTime: Date? = nil
+    
+    // Sub-task management (for multiple audio extractions per file)
+    private var pendingSubTasks: [[String]] = [] // List of arguments for FFmpeg
+    private var currentSubTaskTotal = 1
+    private var currentSubTaskIndex = 0
 
     init() {
         processRunner.delegate = self
@@ -37,17 +47,57 @@ class VideoConverter: ObservableObject {
         for url in urls {
             var scopedURL = url
             let isScoped = url.startAccessingSecurityScopedResource()
-            if !isScoped {
-                print("Warning: Could not start accessing security scoped resource for \(url.lastPathComponent)")
-            }
+            if !isScoped { print("Warning: Access denied for \(url.lastPathComponent)") }
             
-            let item = FileQueueItem(
+            var item = FileQueueItem(
                 inputURL: url,
                 securityScopedInputURL: isScoped ? scopedURL : nil,
-                status: .pending
+                status: .analyzing // Start as analyzing
             )
+            
+            // Add to queue immediately
+            let newIndex = fileQueue.count
             fileQueue.append(item)
+            
+            // Analyze asynchronously
+            Task {
+                let tracks = await analyzeAudioTracks(for: url)
+                if newIndex < self.fileQueue.count {
+                    self.fileQueue[newIndex].audioTracks = tracks
+                    self.fileQueue[newIndex].status = .pending
+                    
+                    // Default Logic: If 1 track, select it. If multiple, select all?
+                    // Let's leave them unselected so user can choose, or default first.
+                    if !tracks.isEmpty {
+                        self.fileQueue[newIndex].audioTracks[0].isSelected = true
+                        self.fileQueue[newIndex].audioTracks[0].customName = url.deletingPathExtension().lastPathComponent + " - Track 1"
+                    }
+                }
+            }
         }
+    }
+    
+    private func analyzeAudioTracks(for url: URL) async -> [AudioTrackInfo] {
+        let asset = AVURLAsset(url: url)
+        var infos: [AudioTrackInfo] = []
+        
+        do {
+            let tracks = try await asset.load(.tracks)
+            let audioTracks = tracks.filter { $0.mediaType == .audio }
+            
+            for (index, track) in audioTracks.enumerated() {
+                var lang = "Unknown"
+                // Try to get language code
+                // Note: accessing language code on older macOS vs newer varies, simpler approach:
+                // We rely on order.
+                
+                let title = "Track \(index + 1)"
+                infos.append(AudioTrackInfo(index: index, language: lang, title: title))
+            }
+        } catch {
+            print("Error analyzing tracks: \(error)")
+        }
+        return infos
     }
 
     func clearQueue() {
@@ -61,22 +111,59 @@ class VideoConverter: ObservableObject {
     func removeItems(at offsets: IndexSet) {
         offsets.forEach { index in
             fileQueue[index].securityScopedInputURL?.stopAccessingSecurityScopedResource()
-            if index == currentItemIndex {
-                cancelBatch()
-            }
+            if index == currentItemIndex { cancelBatch() }
         }
         fileQueue.remove(atOffsets: offsets)
+        if fileQueue.isEmpty { isBatchConverting = false; currentItemIndex = nil }
+    }
+    
+    // MARK: - Helper Update Methods
+    
+    func toggleTrackSelection(itemID: UUID, trackID: UUID) {
+        guard let itemIndex = fileQueue.firstIndex(where: { $0.id == itemID }),
+              let trackIndex = fileQueue[itemIndex].audioTracks.firstIndex(where: { $0.id == trackID }) else { return }
         
-        if fileQueue.isEmpty {
-            isBatchConverting = false
-            currentItemIndex = nil
+        fileQueue[itemIndex].audioTracks[trackIndex].isSelected.toggle()
+        
+        // Auto-generate name if selecting and empty
+        if fileQueue[itemIndex].audioTracks[trackIndex].isSelected && fileQueue[itemIndex].audioTracks[trackIndex].customName.isEmpty {
+            let base = fileQueue[itemIndex].inputURL.deletingPathExtension().lastPathComponent
+            fileQueue[itemIndex].audioTracks[trackIndex].customName = "\(base) - Track \(fileQueue[itemIndex].audioTracks[trackIndex].index + 1)"
         }
+    }
+    
+    func updateTrackName(itemID: UUID, trackID: UUID, newName: String) {
+        guard let itemIndex = fileQueue.firstIndex(where: { $0.id == itemID }),
+              let trackIndex = fileQueue[itemIndex].audioTracks.firstIndex(where: { $0.id == trackID }) else { return }
+        fileQueue[itemIndex].audioTracks[trackIndex].customName = newName
+    }
+    
+    func toggleMerge(itemID: UUID) {
+        guard let idx = fileQueue.firstIndex(where: { $0.id == itemID }) else { return }
+        fileQueue[idx].mergeSelectedTracks.toggle()
+        if fileQueue[idx].mergeSelectedTracks && fileQueue[idx].mergedTrackName.isEmpty {
+            fileQueue[idx].mergedTrackName = fileQueue[idx].inputURL.deletingPathExtension().lastPathComponent + " - Merged"
+        }
+    }
+    
+    func updateMergedName(itemID: UUID, name: String) {
+        guard let idx = fileQueue.firstIndex(where: { $0.id == itemID }) else { return }
+        fileQueue[idx].mergedTrackName = name
     }
 
     // MARK: - Batch Processing
 
     func startBatch() {
         guard !fileQueue.isEmpty else { return }
+        
+        // Check if audio mode but no tracks selected
+        if mode == .audioExtraction {
+            let anyWork = fileQueue.contains { $0.hasWorkToDo }
+            if !anyWork {
+                globalErrorMessage = "Please select at least one audio track to extract."
+                return
+            }
+        }
         
         FileUtilities.chooseOutputDirectory { [weak self] url in
             guard let self = self, let url = url else { return }
@@ -99,48 +186,107 @@ class VideoConverter: ObservableObject {
 
     private func startConversion(at index: Int) {
         currentItemIndex = index
-        var item = fileQueue[index]
-        
-        // NEW: Record start time
         currentItemStartTime = Date()
+        pendingSubTasks = [] // Reset subtasks
         
-        item.status = .preparing
-        item.errorMessage = nil
-        fileQueue[index] = item
+        fileQueue[index].status = .preparing
+        fileQueue[index].errorMessage = nil
+        
+        let item = fileQueue[index]
         
         let count = fileQueue.count
         let processed = fileQueue.filter { $0.status == .completed || $0.status == .failed }.count + 1
         overallProgressMessage = "Processing file \(processed) of \(count): \(item.inputURL.lastPathComponent)"
 
         guard let ffmpegPath = Bundle.main.path(forResource: "ffmpeg", ofType: nil) else {
-            failCurrentItem(message: "FFmpeg binary not found in Bundle.")
-            return
+            failCurrentItem(message: "FFmpeg binary not found."); return
         }
-        
         guard let outDir = outputDirectory else {
-            failCurrentItem(message: "Output directory lost.")
+            failCurrentItem(message: "Output directory lost."); return
+        }
+        
+        // --- GENERATE COMMANDS BASED ON MODE ---
+        
+        if mode == .videoConversion {
+            // Standard 1-to-1 Video
+            let originalFilename = item.inputURL.deletingPathExtension().lastPathComponent
+            let idealURL = outDir.appendingPathComponent(originalFilename).appendingPathExtension(outputFormat.rawValue)
+            let uniqueURL = FileUtilities.generateUniqueOutputPath(from: idealURL)
+            
+            // Save output URL for reference
+            fileQueue[index].outputURL = uniqueURL
+            
+            let args = commandBuilder.buildVideoCommand(
+                inputURL: item.inputURL, outputURL: uniqueURL, outputFormat: outputFormat,
+                videoCodec: videoCodec, videoQuality: videoQuality, audioCodec: audioCodec
+            )
+            pendingSubTasks.append(args)
+            
+        } else {
+            // Audio Extraction (Possibly Multiple)
+            
+            // 1. Individual Tracks
+            for track in item.audioTracks where track.isSelected {
+                let name = track.customName.isEmpty ? "Track \(track.index)" : track.customName
+                let idealURL = outDir.appendingPathComponent(name).appendingPathExtension(audioExportFormat.extensionName)
+                let uniqueURL = FileUtilities.generateUniqueOutputPath(from: idealURL)
+                
+                let args = commandBuilder.buildSingleTrackExtraction(
+                    inputURL: item.inputURL,
+                    outputURL: uniqueURL,
+                    trackIndex: track.index,
+                    format: audioExportFormat
+                )
+                pendingSubTasks.append(args)
+            }
+            
+            // 2. Merged Track
+            if item.mergeSelectedTracks {
+                let selectedIndices = item.audioTracks.filter { $0.isSelected }.map { $0.index }
+                if selectedIndices.count > 1 {
+                    let name = item.mergedTrackName.isEmpty ? "Merged" : item.mergedTrackName
+                    let idealURL = outDir.appendingPathComponent(name).appendingPathExtension(audioExportFormat.extensionName)
+                    let uniqueURL = FileUtilities.generateUniqueOutputPath(from: idealURL)
+                    
+                    let args = commandBuilder.buildMergedAudioCommand(
+                        inputURL: item.inputURL,
+                        outputURL: uniqueURL,
+                        trackIndices: selectedIndices,
+                        format: audioExportFormat
+                    )
+                    pendingSubTasks.append(args)
+                }
+            }
+        }
+        
+        // --- START EXECUTION LOOP ---
+        if pendingSubTasks.isEmpty {
+            failCurrentItem(message: "No tasks generated (did you select a track?)")
             return
         }
         
-        // Unique Filename Logic
-        let originalFilename = item.inputURL.deletingPathExtension().lastPathComponent
-        let idealURL = outDir.appendingPathComponent(originalFilename).appendingPathExtension(outputFormat.rawValue)
-        let uniqueURL = FileUtilities.generateUniqueOutputPath(from: idealURL)
+        currentSubTaskTotal = pendingSubTasks.count
+        currentSubTaskIndex = 0
+        runNextSubTask(ffmpegPath: ffmpegPath)
+    }
+    
+    private func runNextSubTask(ffmpegPath: String) {
+        guard let index = currentItemIndex else { return }
         
-        fileQueue[index].outputURL = uniqueURL
-
-        // Build Command
-        let args = commandBuilder.buildCommand(
-            inputURL: item.inputURL,
-            outputURL: uniqueURL,
-            outputFormat: outputFormat,
-            videoCodec: videoCodec,
-            videoQuality: videoQuality,
-            audioCodec: audioCodec
-        )
-
-        fileQueue[index].status = .converting
-        processRunner.run(ffmpegPath: ffmpegPath, arguments: args, inputURL: item.inputURL)
+        if currentSubTaskIndex < pendingSubTasks.count {
+            fileQueue[index].status = .converting
+            let args = pendingSubTasks[currentSubTaskIndex]
+            
+            // Update message if doing multiple things
+            if currentSubTaskTotal > 1 {
+                overallProgressMessage = "Processing item \(index + 1) (Task \(currentSubTaskIndex + 1)/\(currentSubTaskTotal))..."
+            }
+            
+            processRunner.run(ffmpegPath: ffmpegPath, arguments: args, inputURL: fileQueue[index].inputURL)
+        } else {
+            // All tasks for this file done
+            completeCurrentItem()
+        }
     }
 
     func cancelBatch() {
@@ -148,11 +294,8 @@ class VideoConverter: ObservableObject {
             processRunner.cancel()
             isBatchConverting = false
             overallProgressMessage = "Batch Cancelled"
-            
             for i in 0..<fileQueue.count {
-                if fileQueue[i].status == .pending {
-                    fileQueue[i].status = .cancelled
-                }
+                if fileQueue[i].status == .pending { fileQueue[i].status = .cancelled }
             }
         }
     }
@@ -168,18 +311,12 @@ class VideoConverter: ObservableObject {
     private func formatDuration(_ start: Date) -> String {
         let duration = Date().timeIntervalSince(start)
         let totalSeconds = Int(duration)
-        
         let hours = totalSeconds / 3600
         let minutes = (totalSeconds % 3600) / 60
         let seconds = totalSeconds % 60
-        
-        if hours > 0 {
-            return "\(hours) hours \(minutes) min \(seconds) sec"
-        } else if minutes > 0 {
-            return "\(minutes) min \(seconds) sec"
-        } else {
-            return "\(seconds) sec"
-        }
+        if hours > 0 { return "\(hours)h \(minutes)m \(seconds)s" }
+        else if minutes > 0 { return "\(minutes)m \(seconds)s" }
+        else { return "\(seconds)s" }
     }
     
     private func failCurrentItem(message: String) {
@@ -196,21 +333,8 @@ class VideoConverter: ObservableObject {
         fileQueue[index].progress = 1.0
         fileQueue[index].securityScopedInputURL?.stopAccessingSecurityScopedResource()
         
-        // NEW: Calculate Duration String
         let durationStr = (currentItemStartTime != nil) ? formatDuration(currentItemStartTime!) : ""
-        
-        if let outURL = fileQueue[index].outputURL,
-           let oldSize = FileUtilities.getFileSize(url: fileQueue[index].inputURL),
-           let newSize = FileUtilities.getFileSize(url: outURL) {
-            
-            let oldStr = FileUtilities.formatBytes(oldSize)
-            let newStr = FileUtilities.formatBytes(newSize)
-            // NEW: Added duration to the string
-            fileQueue[index].successMessage = "Done. \(oldStr) → \(newStr) (\(durationStr))"
-        } else {
-            fileQueue[index].successMessage = "Conversion successful (\(durationStr))."
-        }
-
+        fileQueue[index].successMessage = "Done (\(durationStr))"
         runBatchSequence()
     }
 }
@@ -219,20 +343,29 @@ class VideoConverter: ObservableObject {
 extension VideoConverter: FFmpegProcessRunnerDelegate {
     func processRunnerDidUpdateProgress(_ progress: Double) {
         guard let index = currentItemIndex else { return }
-        fileQueue[index].progress = progress
+        
+        // Calculate weighted progress if multiple tasks
+        let taskWeight = 1.0 / Double(currentSubTaskTotal)
+        let currentBase = Double(currentSubTaskIndex) * taskWeight
+        let actualProgress = currentBase + (progress * taskWeight)
+        
+        fileQueue[index].progress = actualProgress
     }
 
     func processRunnerDidFailWithError(_ error: String) {
         if error.contains("Cancelled") {
              guard let index = currentItemIndex else { return }
-             fileQueue[index].status = .cancelled
-             fileQueue[index].errorMessage = "Cancelled"
+             fileQueue[index].status = .cancelled; fileQueue[index].errorMessage = "Cancelled"
         } else {
             failCurrentItem(message: error)
         }
     }
 
     func processRunnerDidFinish() {
-        completeCurrentItem()
+        // Task finished, move to next sub-task
+        currentSubTaskIndex += 1
+        if let ffmpegPath = Bundle.main.path(forResource: "ffmpeg", ofType: nil) {
+            runNextSubTask(ffmpegPath: ffmpegPath)
+        }
     }
 }
