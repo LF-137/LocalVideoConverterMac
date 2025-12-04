@@ -33,9 +33,6 @@ struct FileUtilities {
             
             var validURLs: [URL] = []
             for url in panel.urls {
-                // For files selected via OpenPanel, we technically don't need to manually
-                // start accessing if we use them immediately, but for a queue system,
-                // we should treat them as security scoped to be safe.
                 if isVideoFile(url) {
                     validURLs.append(url)
                 }
@@ -75,5 +72,28 @@ struct FileUtilities {
         formatter.allowedUnits = [.useKB, .useMB, .useGB]
         formatter.countStyle = .file
         return formatter.string(fromByteCount: bytes)
+    }
+    
+    // MARK: - New Logic for Unique Filenames
+    
+    /// Generates a unique URL. If 'Video.mp4' exists, returns 'Video (1).mp4', etc.
+    static func generateUniqueOutputPath(from idealURL: URL) -> URL {
+        var counter = 1
+        var newURL = idealURL
+        
+        // While a file exists at the generated path, keep incrementing the number
+        while FileManager.default.fileExists(atPath: newURL.path) {
+            let folder = idealURL.deletingLastPathComponent()
+            let originalName = idealURL.deletingPathExtension().lastPathComponent
+            let ext = idealURL.pathExtension
+            
+            // Format: "Filename (1).ext"
+            let newName = "\(originalName) (\(counter))"
+            newURL = folder.appendingPathComponent(newName).appendingPathExtension(ext)
+            
+            counter += 1
+        }
+        
+        return newURL
     }
 }

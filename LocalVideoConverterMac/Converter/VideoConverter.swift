@@ -21,6 +21,9 @@ class VideoConverter: ObservableObject {
     private let processRunner = FFmpegProcessRunner()
     private var currentItemIndex: Int? = nil
     private var outputDirectory: URL? = nil
+    
+    // NEW: Variable to track start time
+    private var currentItemStartTime: Date? = nil
 
     init() {
         processRunner.delegate = self
@@ -32,7 +35,6 @@ class VideoConverter: ObservableObject {
         self.globalErrorMessage = nil
         
         for url in urls {
-            // Attempt to create a bookmark or maintain access
             var scopedURL = url
             let isScoped = url.startAccessingSecurityScopedResource()
             if !isScoped {
@@ -50,7 +52,6 @@ class VideoConverter: ObservableObject {
 
     func clearQueue() {
         cancelBatch()
-        // Stop accessing all resources
         fileQueue.forEach { $0.securityScopedInputURL?.stopAccessingSecurityScopedResource() }
         fileQueue.removeAll()
         globalErrorMessage = nil
@@ -58,7 +59,6 @@ class VideoConverter: ObservableObject {
     }
 
     func removeItems(at offsets: IndexSet) {
-        // Stop access for removed items
         offsets.forEach { index in
             fileQueue[index].securityScopedInputURL?.stopAccessingSecurityScopedResource()
             if index == currentItemIndex {
@@ -67,7 +67,6 @@ class VideoConverter: ObservableObject {
         }
         fileQueue.remove(atOffsets: offsets)
         
-        // Reset state if queue becomes empty
         if fileQueue.isEmpty {
             isBatchConverting = false
             currentItemIndex = nil
@@ -90,8 +89,6 @@ class VideoConverter: ObservableObject {
         isBatchConverting = true
         globalErrorMessage = nil
         
-        // Reset completed items if restarting? (Optional, currently checks for pending)
-        // Find next pending
         guard let index = fileQueue.firstIndex(where: { $0.status == .pending }) else {
             finishBatch()
             return
@@ -104,7 +101,9 @@ class VideoConverter: ObservableObject {
         currentItemIndex = index
         var item = fileQueue[index]
         
-        // Update UI
+        // NEW: Record start time
+        currentItemStartTime = Date()
+        
         item.status = .preparing
         item.errorMessage = nil
         fileQueue[index] = item
@@ -113,45 +112,43 @@ class VideoConverter: ObservableObject {
         let processed = fileQueue.filter { $0.status == .completed || $0.status == .failed }.count + 1
         overallProgressMessage = "Processing file \(processed) of \(count): \(item.inputURL.lastPathComponent)"
 
-        // Check FFmpeg
         guard let ffmpegPath = Bundle.main.path(forResource: "ffmpeg", ofType: nil) else {
             failCurrentItem(message: "FFmpeg binary not found in Bundle.")
             return
         }
         
-        // Determine Output URL
         guard let outDir = outputDirectory else {
             failCurrentItem(message: "Output directory lost.")
             return
         }
         
-        let filename = item.inputURL.deletingPathExtension().lastPathComponent
-        let outURL = outDir.appendingPathComponent(filename).appendingPathExtension(outputFormat.rawValue)
+        // Unique Filename Logic
+        let originalFilename = item.inputURL.deletingPathExtension().lastPathComponent
+        let idealURL = outDir.appendingPathComponent(originalFilename).appendingPathExtension(outputFormat.rawValue)
+        let uniqueURL = FileUtilities.generateUniqueOutputPath(from: idealURL)
         
-        fileQueue[index].outputURL = outURL
+        fileQueue[index].outputURL = uniqueURL
 
         // Build Command
         let args = commandBuilder.buildCommand(
             inputURL: item.inputURL,
-            outputURL: outURL,
+            outputURL: uniqueURL,
             outputFormat: outputFormat,
             videoCodec: videoCodec,
             videoQuality: videoQuality,
             audioCodec: audioCodec
         )
 
-        // Run
         fileQueue[index].status = .converting
         processRunner.run(ffmpegPath: ffmpegPath, arguments: args, inputURL: item.inputURL)
     }
 
     func cancelBatch() {
         if isBatchConverting {
-            processRunner.cancel() // Delegate will handle the failure state
+            processRunner.cancel()
             isBatchConverting = false
             overallProgressMessage = "Batch Cancelled"
             
-            // Mark remaining pending as cancelled
             for i in 0..<fileQueue.count {
                 if fileQueue[i].status == .pending {
                     fileQueue[i].status = .cancelled
@@ -166,15 +163,30 @@ class VideoConverter: ObservableObject {
         overallProgressMessage = "Batch Completed."
     }
     
-    // MARK: - Helpers for Delegate
+    // MARK: - Helpers
+    
+    private func formatDuration(_ start: Date) -> String {
+        let duration = Date().timeIntervalSince(start)
+        let totalSeconds = Int(duration)
+        
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
+        let seconds = totalSeconds % 60
+        
+        if hours > 0 {
+            return "\(hours) hours \(minutes) min \(seconds) sec"
+        } else if minutes > 0 {
+            return "\(minutes) min \(seconds) sec"
+        } else {
+            return "\(seconds) sec"
+        }
+    }
     
     private func failCurrentItem(message: String) {
         guard let index = currentItemIndex else { return }
         fileQueue[index].status = .failed
         fileQueue[index].errorMessage = message
         fileQueue[index].securityScopedInputURL?.stopAccessingSecurityScopedResource()
-        
-        // Continue queue
         runBatchSequence()
     }
     
@@ -184,19 +196,21 @@ class VideoConverter: ObservableObject {
         fileQueue[index].progress = 1.0
         fileQueue[index].securityScopedInputURL?.stopAccessingSecurityScopedResource()
         
-        // Calc Compression stats
+        // NEW: Calculate Duration String
+        let durationStr = (currentItemStartTime != nil) ? formatDuration(currentItemStartTime!) : ""
+        
         if let outURL = fileQueue[index].outputURL,
            let oldSize = FileUtilities.getFileSize(url: fileQueue[index].inputURL),
            let newSize = FileUtilities.getFileSize(url: outURL) {
             
             let oldStr = FileUtilities.formatBytes(oldSize)
             let newStr = FileUtilities.formatBytes(newSize)
-            fileQueue[index].successMessage = "Done. \(oldStr) → \(newStr)"
+            // NEW: Added duration to the string
+            fileQueue[index].successMessage = "Done. \(oldStr) → \(newStr) (\(durationStr))"
         } else {
-            fileQueue[index].successMessage = "Conversion successful."
+            fileQueue[index].successMessage = "Conversion successful (\(durationStr))."
         }
 
-        // Continue queue
         runBatchSequence()
     }
 }
