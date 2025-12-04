@@ -8,22 +8,21 @@ class FFmpegProcessRunner {
     
     weak var delegate: FFmpegProcessRunnerDelegate?
     private var videoDuration: Double = 0.0
+    private var userCancelled: Bool = false // Tracks if user clicked cancel
     
-    // Compile Regex once for performance
+    // Compile Regex once
     private let progressRegex = try? NSRegularExpression(pattern: #"out_time_us=(\d+)"#)
 
     func run(ffmpegPath: String, arguments: [String], inputURL: URL) {
-        // Reset state
         self.videoDuration = 0.0
+        self.userCancelled = false // Reset flag
         
-        // 1. Get Duration Asynchronously
         Task {
             let asset = AVURLAsset(url: inputURL)
             if let duration = try? await asset.load(.duration) {
                 self.videoDuration = CMTimeGetSeconds(duration)
             }
             
-            // 2. Start Process on Main Thread (safe for Process object) to launch
             await MainActor.run {
                 self.launchProcess(path: ffmpegPath, args: arguments)
             }
@@ -38,9 +37,6 @@ class FFmpegProcessRunner {
         let pipe = Pipe()
         task.standardOutput = pipe
         self.outputPipe = pipe
-        
-        // We don't strictly need stderr for progress, but good for debug if needed
-        // task.standardError = Pipe()
 
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
@@ -66,8 +62,6 @@ class FFmpegProcessRunner {
     private func parseProgress(data: Data) {
         guard let string = String(data: data, encoding: .utf8), videoDuration > 0 else { return }
         
-        // Simple string parsing is often faster than regex for high frequency logs,
-        // but regex is robust.
         let range = NSRange(location: 0, length: string.utf16.count)
         if let match = progressRegex?.firstMatch(in: string, options: [], range: range) {
             if let r = Range(match.range(at: 1), in: string),
@@ -85,21 +79,21 @@ class FFmpegProcessRunner {
     private func handleTermination(_ process: Process) {
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         
-        if process.terminationStatus == 0 {
+        // CHECK FLAG FIRST: This guarantees we know it was a user action
+        if userCancelled {
+            delegate?.processRunnerDidFailWithError("Cancelled")
+        }
+        else if process.terminationStatus == 0 {
             delegate?.processRunnerDidFinish()
         } else {
-            // 15 = SIGTERM (Cancelled)
-            if process.terminationStatus == 15 {
-                delegate?.processRunnerDidFailWithError("Cancelled by user")
-            } else {
-                delegate?.processRunnerDidFailWithError("FFmpeg exited with code \(process.terminationStatus)")
-            }
+            delegate?.processRunnerDidFailWithError("FFmpeg exited with code \(process.terminationStatus)")
         }
         self.process = nil
     }
 
     func cancel() {
         if let process = process, process.isRunning {
+            userCancelled = true // Set flag immediately
             process.terminate()
         }
     }

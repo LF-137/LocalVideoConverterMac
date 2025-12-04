@@ -112,8 +112,18 @@ struct ContentView: View {
                     .disabled(converter.isBatchConverting)
                     
                     if !converter.fileQueue.isEmpty {
-                        Button("Clear") { converter.clearQueue() }
+                        // Existing Clear All
+                        Button("Clear All") { converter.clearQueue() }
                         .disabled(converter.isBatchConverting)
+                        
+                        // NEW: Clear Completed
+                        if converter.fileQueue.contains(where: { $0.status == .completed }) {
+                             Button("Clear Done") {
+                                 let offsets = IndexSet(converter.fileQueue.indices.filter { converter.fileQueue[$0].status == .completed })
+                                 converter.removeItems(at: offsets)
+                             }
+                             .disabled(converter.isBatchConverting)
+                        }
                     }
 
                     Spacer()
