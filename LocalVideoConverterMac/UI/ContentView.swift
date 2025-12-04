@@ -5,8 +5,6 @@ import UserNotifications
 struct ContentView: View {
     @StateObject private var converter = VideoConverter()
     @State private var showSettings = false
-    
-    // We need to hold a strong reference to the delegate
     @State private var notificationDelegate = NotificationDelegate()
     
     // MARK: - Persistent Settings
@@ -40,7 +38,10 @@ struct ContentView: View {
                 }
                 .pickerStyle(.segmented)
                 .disabled(converter.isBatchConverting || !converter.fileQueue.isEmpty)
-                .onChange(of: savedMode) { newValue in converter.mode = newValue }
+                // FIX: Updated syntax for macOS 14+
+                .onChange(of: savedMode) { _, newValue in
+                    converter.mode = newValue
+                }
             }
             .padding()
             .background(Color(NSColor.controlBackgroundColor))
@@ -55,7 +56,10 @@ struct ContentView: View {
                         }
                     }
                     .frame(width: 100)
-                    .onChange(of: savedAudioFormat) { converter.audioExportFormat = $0 }
+                    // FIX: Updated syntax for macOS 14+
+                    .onChange(of: savedAudioFormat) { _, newValue in
+                        converter.audioExportFormat = newValue
+                    }
                     
                     Spacer()
                     Text("Expand items below to select tracks")
@@ -85,6 +89,7 @@ struct ContentView: View {
                             FileQueueRow(item: item, converter: converter)
                         }
                         .onDelete(perform: converter.removeItems)
+                        .onMove(perform: converter.moveItems)
                     }
                 }
             }
@@ -112,11 +117,9 @@ struct ContentView: View {
                     .disabled(converter.isBatchConverting)
                     
                     if !converter.fileQueue.isEmpty {
-                        // Existing Clear All
                         Button("Clear All") { converter.clearQueue() }
                         .disabled(converter.isBatchConverting)
                         
-                        // NEW: Clear Completed
                         if converter.fileQueue.contains(where: { $0.status == .completed }) {
                              Button("Clear Done") {
                                  let offsets = IndexSet(converter.fileQueue.indices.filter { converter.fileQueue[$0].status == .completed })
@@ -170,18 +173,13 @@ struct ContentView: View {
             UNUserNotificationCenter.current().delegate = notificationDelegate
             
             // 2. Request Permissions
-            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
-                if let error = error {
-                    print("Notification permission error: \(error)")
-                }
-            }
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         }
     }
 }
 
-// MARK: - Notification Delegate (Fixes Foreground Issue)
+// MARK: - Notification Delegate
 class NotificationDelegate: NSObject, UNUserNotificationCenterDelegate {
-    // This function tells the system: "If a notification comes in while the app is open, show it anyway."
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         completionHandler([.banner, .sound])
     }

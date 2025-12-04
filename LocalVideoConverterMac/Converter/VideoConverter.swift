@@ -1,8 +1,8 @@
 import Foundation
 import Combine
 import AVFoundation
-import AppKit            // Required for NSWorkspace
-import UserNotifications // Required for System Notifications
+import AppKit
+import UserNotifications
 
 @MainActor
 class VideoConverter: ObservableObject {
@@ -13,16 +13,12 @@ class VideoConverter: ObservableObject {
     @Published var overallProgressMessage: String = ""
     @Published var globalErrorMessage: String? = nil
     
-    // Mode
     @Published var mode: ConversionMode = .videoConversion
     
-    // Settings
     @Published var outputFormat: OutputFormat = .mp4
     @Published var videoQuality: VideoQuality = .medium
     @Published var audioCodec: AudioCodec = .aac
     @Published var videoCodec: VideoCodec = .h264
-    
-    // Audio Settings
     @Published var audioExportFormat: AudioExportFormat = .mp3
 
     // MARK: - Internal State
@@ -32,12 +28,9 @@ class VideoConverter: ObservableObject {
     private var outputDirectory: URL? = nil
     private var currentItemStartTime: Date? = nil
     
-    // Sub-task management
     private var pendingSubTasks: [[String]] = []
     private var currentSubTaskTotal = 1
     private var currentSubTaskIndex = 0
-    
-    // NEW: Track all output paths for the current item (Video or Multiple Audio)
     private var currentActiveOutputURLs: [URL] = []
 
     init() {
@@ -50,6 +43,12 @@ class VideoConverter: ObservableObject {
         self.globalErrorMessage = nil
         
         for url in urls {
+            // DUPLICATE CHECK: Skip if already in queue
+            if fileQueue.contains(where: { $0.inputURL.path == url.path }) {
+                print("Skipping duplicate: \(url.lastPathComponent)")
+                continue
+            }
+
             var scopedURL = url
             let isScoped = url.startAccessingSecurityScopedResource()
             if !isScoped { print("Warning: Access denied for \(url.lastPathComponent)") }
@@ -65,7 +64,8 @@ class VideoConverter: ObservableObject {
             
             Task {
                 let tracks = await analyzeAudioTracks(for: url)
-                if newIndex < self.fileQueue.count {
+                // Ensure index is still valid before updating
+                if newIndex < self.fileQueue.count && self.fileQueue[newIndex].id == item.id {
                     self.fileQueue[newIndex].audioTracks = tracks
                     self.fileQueue[newIndex].status = .pending
                     
@@ -76,6 +76,11 @@ class VideoConverter: ObservableObject {
                 }
             }
         }
+    }
+    
+    // NEW: Reorder Function
+    func moveItems(from source: IndexSet, to destination: Int) {
+        fileQueue.move(fromOffsets: source, toOffset: destination)
     }
     
     private func analyzeAudioTracks(for url: URL) async -> [AudioTrackInfo] {
@@ -182,7 +187,7 @@ class VideoConverter: ObservableObject {
         currentItemIndex = index
         currentItemStartTime = Date()
         pendingSubTasks = []
-        currentActiveOutputURLs = [] // Reset the tracker
+        currentActiveOutputURLs = []
         
         fileQueue[index].status = .preparing
         fileQueue[index].errorMessage = nil
@@ -206,22 +211,23 @@ class VideoConverter: ObservableObject {
             let uniqueURL = FileUtilities.generateUniqueOutputPath(from: idealURL)
             
             fileQueue[index].outputURL = uniqueURL
-            currentActiveOutputURLs.append(uniqueURL) // Track it
+            currentActiveOutputURLs.append(uniqueURL)
             
             let args = commandBuilder.buildVideoCommand(
                 inputURL: item.inputURL, outputURL: uniqueURL, outputFormat: outputFormat,
                 videoCodec: videoCodec, videoQuality: videoQuality, audioCodec: audioCodec
             )
+            
+            print("🚀 Running FFmpeg Command: \(args.joined(separator: " "))")
             pendingSubTasks.append(args)
             
         } else {
-            // Audio Extraction Loop
             for track in item.audioTracks where track.isSelected {
                 let name = track.customName.isEmpty ? "Track \(track.index)" : track.customName
                 let idealURL = outDir.appendingPathComponent(name).appendingPathExtension(audioExportFormat.extensionName)
                 let uniqueURL = FileUtilities.generateUniqueOutputPath(from: idealURL)
                 
-                currentActiveOutputURLs.append(uniqueURL) // Track it
+                currentActiveOutputURLs.append(uniqueURL)
                 
                 let args = commandBuilder.buildSingleTrackExtraction(
                     inputURL: item.inputURL,
@@ -232,7 +238,6 @@ class VideoConverter: ObservableObject {
                 pendingSubTasks.append(args)
             }
             
-            // Merged Audio
             if item.mergeSelectedTracks {
                 let selectedIndices = item.audioTracks.filter { $0.isSelected }.map { $0.index }
                 if selectedIndices.count > 1 {
@@ -240,7 +245,7 @@ class VideoConverter: ObservableObject {
                     let idealURL = outDir.appendingPathComponent(name).appendingPathExtension(audioExportFormat.extensionName)
                     let uniqueURL = FileUtilities.generateUniqueOutputPath(from: idealURL)
                     
-                    currentActiveOutputURLs.append(uniqueURL) // Track it
+                    currentActiveOutputURLs.append(uniqueURL)
                     
                     let args = commandBuilder.buildMergedAudioCommand(
                         inputURL: item.inputURL,
@@ -300,19 +305,13 @@ class VideoConverter: ObservableObject {
     
     // MARK: - Helpers
     
-    // Updated to use the list of ALL generated URLs
     private func cleanupPartialFiles(at index: Int) {
         let urlsToClean = currentActiveOutputURLs
-        
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             for url in urlsToClean {
                 if FileManager.default.fileExists(atPath: url.path) {
-                    do {
-                        try FileManager.default.removeItem(at: url)
-                        print("✅ Successfully removed partial file: \(url.lastPathComponent)")
-                    } catch {
-                        print("❌ Failed to remove partial file: \(error.localizedDescription)")
-                    }
+                    try? FileManager.default.removeItem(at: url)
+                    print("✅ Successfully removed partial file: \(url.lastPathComponent)")
                 }
             }
         }
@@ -322,7 +321,6 @@ class VideoConverter: ObservableObject {
         if let url = item.outputURL {
             NSWorkspace.shared.activateFileViewerSelecting([url])
         } else {
-            // For audio extraction with multiple files, we open the folder
             if let directory = outputDirectory {
                 NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: directory.path)
             }
@@ -334,7 +332,6 @@ class VideoConverter: ObservableObject {
         content.title = "Conversion Completed"
         content.body = "Your batch processing has finished."
         content.sound = UNNotificationSound.default
-        
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
     }
@@ -371,15 +368,12 @@ class VideoConverter: ObservableObject {
     }
 }
 
-// MARK: - Delegate Conformance
 extension VideoConverter: FFmpegProcessRunnerDelegate {
     func processRunnerDidUpdateProgress(_ progress: Double) {
         guard let index = currentItemIndex else { return }
-        
         let taskWeight = 1.0 / Double(currentSubTaskTotal)
         let currentBase = Double(currentSubTaskIndex) * taskWeight
         let actualProgress = currentBase + (progress * taskWeight)
-        
         fileQueue[index].progress = actualProgress
     }
 
