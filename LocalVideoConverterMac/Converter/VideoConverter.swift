@@ -26,7 +26,10 @@ class VideoConverter: ObservableObject {
     private let processRunner = FFmpegProcessRunner()
     private var currentItemIndex: Int? = nil
     private var outputDirectory: URL? = nil
+    
+    // Timer Logic
     private var currentItemStartTime: Date? = nil
+    private var timer: Timer?
     
     private var pendingSubTasks: [[String]] = []
     private var currentSubTaskTotal = 1
@@ -43,7 +46,6 @@ class VideoConverter: ObservableObject {
         self.globalErrorMessage = nil
         
         for url in urls {
-            // DUPLICATE CHECK: Skip if already in queue
             if fileQueue.contains(where: { $0.inputURL.path == url.path }) {
                 print("Skipping duplicate: \(url.lastPathComponent)")
                 continue
@@ -64,7 +66,6 @@ class VideoConverter: ObservableObject {
             
             Task {
                 let tracks = await analyzeAudioTracks(for: url)
-                // Ensure index is still valid before updating
                 if newIndex < self.fileQueue.count && self.fileQueue[newIndex].id == item.id {
                     self.fileQueue[newIndex].audioTracks = tracks
                     self.fileQueue[newIndex].status = .pending
@@ -78,7 +79,6 @@ class VideoConverter: ObservableObject {
         }
     }
     
-    // NEW: Reorder Function
     func moveItems(from source: IndexSet, to destination: Int) {
         fileQueue.move(fromOffsets: source, toOffset: destination)
     }
@@ -189,8 +189,12 @@ class VideoConverter: ObservableObject {
         pendingSubTasks = []
         currentActiveOutputURLs = []
         
+        // Start the UI Timer
+        startTimer()
+        
         fileQueue[index].status = .preparing
         fileQueue[index].errorMessage = nil
+        fileQueue[index].elapsedTime = "00:00"
         
         let item = fileQueue[index]
         
@@ -259,7 +263,7 @@ class VideoConverter: ObservableObject {
         }
         
         if pendingSubTasks.isEmpty {
-            failCurrentItem(message: "No tasks generated (did you select a track?)")
+            failCurrentItem(message: "No tasks generated.")
             return
         }
         
@@ -287,6 +291,7 @@ class VideoConverter: ObservableObject {
 
     func cancelBatch() {
         if isBatchConverting {
+            stopTimer() // Stop the clock
             processRunner.cancel()
             isBatchConverting = false
             overallProgressMessage = "Batch Cancelled"
@@ -297,10 +302,43 @@ class VideoConverter: ObservableObject {
     }
 
     private func finishBatch() {
+        stopTimer()
         isBatchConverting = false
         currentItemIndex = nil
         overallProgressMessage = "Batch Completed."
         sendNotification()
+    }
+    
+    // MARK: - Timer Logic
+    private func startTimer() {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.updateTimerUI()
+            }
+        }
+    }
+    
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
+    }
+    
+    private func updateTimerUI() {
+        guard let index = currentItemIndex,
+              let start = currentItemStartTime,
+              index < fileQueue.count else { return }
+        
+        let elapsed = Date().timeIntervalSince(start)
+        let s = Int(elapsed) % 60
+        let m = (Int(elapsed) / 60) % 60
+        let h = Int(elapsed) / 3600
+        
+        if h > 0 {
+            fileQueue[index].elapsedTime = String(format: "%02d:%02d:%02d", h, m, s)
+        } else {
+            fileQueue[index].elapsedTime = String(format: "%02d:%02d", m, s)
+        }
     }
     
     // MARK: - Helpers
@@ -318,9 +356,11 @@ class VideoConverter: ObservableObject {
     }
     
     func revealInFinder(item: FileQueueItem) {
+        // If we have a specific output URL (video mode), use it
         if let url = item.outputURL {
             NSWorkspace.shared.activateFileViewerSelecting([url])
         } else {
+            // Audio mode often generates multiple files, just open the folder
             if let directory = outputDirectory {
                 NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: directory.path)
             }
@@ -339,16 +379,17 @@ class VideoConverter: ObservableObject {
     private func formatDuration(_ start: Date) -> String {
         let duration = Date().timeIntervalSince(start)
         let totalSeconds = Int(duration)
-        let hours = totalSeconds / 3600
-        let minutes = (totalSeconds % 3600) / 60
-        let seconds = totalSeconds % 60
-        if hours > 0 { return "\(hours)h \(minutes)m \(seconds)s" }
-        else if minutes > 0 { return "\(minutes)m \(seconds)s" }
-        else { return "\(seconds)s" }
+        let h = totalSeconds / 3600
+        let m = (totalSeconds % 3600) / 60
+        let s = totalSeconds % 60
+        if h > 0 { return "\(h)h \(m)m \(s)s" }
+        else if m > 0 { return "\(m)m \(s)s" }
+        else { return "\(s)s" }
     }
     
     private func failCurrentItem(message: String) {
         guard let index = currentItemIndex else { return }
+        stopTimer()
         cleanupPartialFiles(at: index)
         fileQueue[index].status = .failed
         fileQueue[index].errorMessage = message
@@ -358,12 +399,33 @@ class VideoConverter: ObservableObject {
     
     private func completeCurrentItem() {
         guard let index = currentItemIndex else { return }
+        stopTimer()
         fileQueue[index].status = .completed
         fileQueue[index].progress = 1.0
         fileQueue[index].securityScopedInputURL?.stopAccessingSecurityScopedResource()
         
         let durationStr = (currentItemStartTime != nil) ? formatDuration(currentItemStartTime!) : ""
-        fileQueue[index].successMessage = "Done (\(durationStr))"
+        
+        // SIZE CALCULATION LOGIC
+        // We prefer specific outputURL (Video), otherwise check the tracker list (Audio)
+        var sizeInfo = ""
+        let inputSize = FileUtilities.getFileSize(url: fileQueue[index].inputURL)
+        
+        if let outURL = fileQueue[index].outputURL,
+           let oldSize = inputSize,
+           let newSize = FileUtilities.getFileSize(url: outURL) {
+            
+            let oldStr = FileUtilities.formatBytes(oldSize)
+            let newStr = FileUtilities.formatBytes(newSize)
+            sizeInfo = "\(oldStr) → \(newStr)"
+        }
+        
+        if sizeInfo.isEmpty {
+             fileQueue[index].successMessage = "Done (\(durationStr))"
+        } else {
+             fileQueue[index].successMessage = "Done (\(durationStr)) • \(sizeInfo)"
+        }
+        
         runBatchSequence()
     }
 }
@@ -380,6 +442,7 @@ extension VideoConverter: FFmpegProcessRunnerDelegate {
     func processRunnerDidFailWithError(_ error: String) {
         if error.contains("Cancelled") {
              guard let index = currentItemIndex else { return }
+             stopTimer()
              cleanupPartialFiles(at: index)
              fileQueue[index].status = .cancelled; fileQueue[index].errorMessage = "Cancelled"
              fileQueue[index].securityScopedInputURL?.stopAccessingSecurityScopedResource()

@@ -1,7 +1,6 @@
 import Foundation
 
 // MARK: - Enums
-// We ensure RawRepresentable (String) is used so @AppStorage works automatically
 
 enum ConversionMode: String, CaseIterable, Identifiable {
     case videoConversion = "Convert Video"
@@ -67,32 +66,32 @@ enum ConversionStatus: String, CaseIterable {
 
 struct AudioTrackInfo: Identifiable, Equatable {
     let id = UUID()
-    let index: Int // The index in FFmpeg (0:a:0, 0:a:1)
+    let index: Int
     var language: String
     var title: String
-    
-    // UI State for Extraction
     var isSelected: Bool = false
-    var customName: String = "" // User defined output filename
+    var customName: String = ""
 }
 
 struct FileQueueItem: Identifiable, Equatable {
     let id = UUID()
     let inputURL: URL
-    var outputURL: URL? // Used for video conversion
+    var outputURL: URL?
     var securityScopedInputURL: URL?
     
     var status: ConversionStatus = .pending
     var progress: Double = 0.0
+    
+    // NEW: Live Timer String
+    var elapsedTime: String = ""
+    
     var errorMessage: String?
     var successMessage: String?
     
-    // Audio Extraction Specifics
     var audioTracks: [AudioTrackInfo] = []
     var mergeSelectedTracks: Bool = false
     var mergedTrackName: String = ""
     
-    // Helper to see if any work is selected
     var hasWorkToDo: Bool {
         return audioTracks.contains(where: { $0.isSelected }) || mergeSelectedTracks
     }
@@ -101,6 +100,7 @@ struct FileQueueItem: Identifiable, Equatable {
         return lhs.id == rhs.id &&
                lhs.status == rhs.status &&
                lhs.progress == rhs.progress &&
+               lhs.elapsedTime == rhs.elapsedTime && // Check for timer updates
                lhs.errorMessage == rhs.errorMessage &&
                lhs.successMessage == rhs.successMessage &&
                lhs.audioTracks == rhs.audioTracks &&
