@@ -20,6 +20,9 @@ class VideoConverter: ObservableObject {
     @Published var audioCodec: AudioCodec = .aac
     @Published var videoCodec: VideoCodec = .h264
     @Published var audioExportFormat: AudioExportFormat = .mp3
+    
+    // NEW: Store the selected engine
+    @Published var encodingType: EncodingType = .hardware
 
     // MARK: - Internal State
     private let commandBuilder = FFmpegCommandBuilder()
@@ -217,9 +220,15 @@ class VideoConverter: ObservableObject {
             fileQueue[index].outputURL = uniqueURL
             currentActiveOutputURLs.append(uniqueURL)
             
+            // UPDATED: Pass the encodingType here
             let args = commandBuilder.buildVideoCommand(
-                inputURL: item.inputURL, outputURL: uniqueURL, outputFormat: outputFormat,
-                videoCodec: videoCodec, videoQuality: videoQuality, audioCodec: audioCodec
+                inputURL: item.inputURL,
+                outputURL: uniqueURL,
+                outputFormat: outputFormat,
+                videoCodec: videoCodec,
+                videoQuality: videoQuality,
+                audioCodec: audioCodec,
+                encodingType: encodingType // <--- Using the state variable
             )
             
             print("🚀 Running FFmpeg Command: \(args.joined(separator: " "))")
@@ -291,7 +300,7 @@ class VideoConverter: ObservableObject {
 
     func cancelBatch() {
         if isBatchConverting {
-            stopTimer() // Stop the clock
+            stopTimer()
             processRunner.cancel()
             isBatchConverting = false
             overallProgressMessage = "Batch Cancelled"
@@ -356,11 +365,9 @@ class VideoConverter: ObservableObject {
     }
     
     func revealInFinder(item: FileQueueItem) {
-        // If we have a specific output URL (video mode), use it
         if let url = item.outputURL {
             NSWorkspace.shared.activateFileViewerSelecting([url])
         } else {
-            // Audio mode often generates multiple files, just open the folder
             if let directory = outputDirectory {
                 NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: directory.path)
             }
@@ -368,12 +375,7 @@ class VideoConverter: ObservableObject {
     }
     
     private func sendNotification() {
-        let content = UNMutableNotificationContent()
-        content.title = "Conversion Completed"
-        content.body = "Your batch processing has finished."
-        content.sound = UNNotificationSound.default
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
+        NotificationManager.shared.sendCompletionNotification()
     }
     
     private func formatDuration(_ start: Date) -> String {
@@ -406,8 +408,6 @@ class VideoConverter: ObservableObject {
         
         let durationStr = (currentItemStartTime != nil) ? formatDuration(currentItemStartTime!) : ""
         
-        // SIZE CALCULATION LOGIC
-        // We prefer specific outputURL (Video), otherwise check the tracker list (Audio)
         var sizeInfo = ""
         let inputSize = FileUtilities.getFileSize(url: fileQueue[index].inputURL)
         

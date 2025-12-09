@@ -3,35 +3,66 @@ import Foundation
 class FFmpegCommandBuilder {
 
     // MARK: - Video Command
-    func buildVideoCommand(inputURL: URL, outputURL: URL, outputFormat: OutputFormat, videoCodec: VideoCodec, videoQuality: VideoQuality, audioCodec: AudioCodec) -> [String] {
+    // Updated signature to include encodingType
+    func buildVideoCommand(
+        inputURL: URL,
+        outputURL: URL,
+        outputFormat: OutputFormat,
+        videoCodec: VideoCodec,
+        videoQuality: VideoQuality,
+        audioCodec: AudioCodec,
+        encodingType: EncodingType
+    ) -> [String] {
 
         var arguments = ["-y", "-i", inputURL.path, "-progress", "pipe:1"]
 
-        // MARK: - Software Encoding (CPU)
-        // Best for Quality/File Size balance using CRF (Constant Rate Factor)
-        
-        switch videoCodec {
-        case .h264:
-            arguments.append(contentsOf: ["-c:v", "libx264"])
-            switch videoQuality {
-            case .high:   arguments.append(contentsOf: ["-crf", "18", "-preset", "slow"])
-            case .medium: arguments.append(contentsOf: ["-crf", "23", "-preset", "medium"])
-            case .low:    arguments.append(contentsOf: ["-crf", "28", "-preset", "fast"])
-            }
-            // Pixel format for H.264 compatibility
-            arguments.append(contentsOf: ["-pix_fmt", "yuv420p"])
+        if encodingType == .software {
+            // MARK: - Software Encoding (CPU)
+            // Uses libx264/libx265 with CRF for best efficiency
+            switch videoCodec {
+            case .h264:
+                arguments.append(contentsOf: ["-c:v", "libx264"])
+                arguments.append(contentsOf: ["-pix_fmt", "yuv420p"])
+                switch videoQuality {
+                case .high:   arguments.append(contentsOf: ["-crf", "18", "-preset", "slow"])
+                case .medium: arguments.append(contentsOf: ["-crf", "23", "-preset", "medium"])
+                case .low:    arguments.append(contentsOf: ["-crf", "28", "-preset", "fast"])
+                }
 
-        case .hevc:
-            arguments.append(contentsOf: ["-c:v", "libx265"])
-            arguments.append(contentsOf: ["-tag:v", "hvc1"]) // Apple compatibility tag
-            switch videoQuality {
-            case .high:   arguments.append(contentsOf: ["-crf", "20", "-preset", "slow"])
-            case .medium: arguments.append(contentsOf: ["-crf", "26", "-preset", "medium"])
-            case .low:    arguments.append(contentsOf: ["-crf", "30", "-preset", "fast"])
+            case .hevc:
+                arguments.append(contentsOf: ["-c:v", "libx265"])
+                arguments.append(contentsOf: ["-tag:v", "hvc1"])
+                switch videoQuality {
+                case .high:   arguments.append(contentsOf: ["-crf", "20", "-preset", "slow"])
+                case .medium: arguments.append(contentsOf: ["-crf", "26", "-preset", "medium"])
+                case .low:    arguments.append(contentsOf: ["-crf", "30", "-preset", "fast"])
+                }
+            }
+        } else {
+            // MARK: - Hardware Encoding (Apple Silicon)
+            // Uses VideoToolbox with Quality Scale (-q:v)
+            switch videoCodec {
+            case .h264:
+                arguments.append(contentsOf: ["-c:v", "h264_videotoolbox"])
+                arguments.append(contentsOf: ["-profile:v", "high"])
+                switch videoQuality {
+                case .high:   arguments.append(contentsOf: ["-q:v", "75"])
+                case .medium: arguments.append(contentsOf: ["-q:v", "60"])
+                case .low:    arguments.append(contentsOf: ["-q:v", "45"])
+                }
+
+            case .hevc:
+                arguments.append(contentsOf: ["-c:v", "hevc_videotoolbox"])
+                arguments.append(contentsOf: ["-tag:v", "hvc1"])
+                switch videoQuality {
+                case .high:   arguments.append(contentsOf: ["-q:v", "75"])
+                case .medium: arguments.append(contentsOf: ["-q:v", "60"])
+                case .low:    arguments.append(contentsOf: ["-q:v", "45"])
+                }
             }
         }
 
-        // Audio Settings
+        // Common Audio Settings
         switch audioCodec {
         case .aac: arguments.append(contentsOf: ["-c:a", "aac", "-b:a", "192k"])
         case .mp3: arguments.append(contentsOf: ["-c:a", "libmp3lame", "-b:a", "192k"])

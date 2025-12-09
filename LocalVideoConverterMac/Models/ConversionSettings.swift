@@ -2,6 +2,20 @@ import Foundation
 
 // MARK: - Enums
 
+enum EncodingType: String, CaseIterable, Identifiable {
+    case hardware = "Hardware (Fastest)"
+    case software = "Software (Best Efficiency)"
+    
+    var id: String { self.rawValue }
+    
+    var description: String {
+        switch self {
+        case .hardware: return "Uses M1 Media Engine. Extremely fast. Cooler system. Slightly larger files."
+        case .software: return "Uses CPU. Slower. Best compression (smaller files) for the quality."
+        }
+    }
+}
+
 enum ConversionMode: String, CaseIterable, Identifiable {
     case videoConversion = "Convert Video"
     case audioExtraction = "Extract Audio"
@@ -82,7 +96,6 @@ struct FileQueueItem: Identifiable, Equatable {
     var status: ConversionStatus = .pending
     var progress: Double = 0.0
     
-    // NEW: Live Timer String
     var elapsedTime: String = ""
     
     var errorMessage: String?
@@ -100,7 +113,7 @@ struct FileQueueItem: Identifiable, Equatable {
         return lhs.id == rhs.id &&
                lhs.status == rhs.status &&
                lhs.progress == rhs.progress &&
-               lhs.elapsedTime == rhs.elapsedTime && // Check for timer updates
+               lhs.elapsedTime == rhs.elapsedTime &&
                lhs.errorMessage == rhs.errorMessage &&
                lhs.successMessage == rhs.successMessage &&
                lhs.audioTracks == rhs.audioTracks &&
