@@ -1,7 +1,6 @@
 With this project I create my own local video converter for MacOS.
 
-It's more of a playground for how far I can get by letting AI program for me.
-In reality, I don't know much about coding for OS environment nor the swift programming languange.
-I just know about Data Science and python.
+The app is a helpful tool to me converting videos locally in a batch through drag and drop. It's a bit faster than other tools that I tried (e.g. VLC) and more robust for my workflow, especially when running in the background.
 
-Still, I can build my own tools with AI in environments I am not used to. This way I figure out the limitations of current available free AI LLMs.
+In it's core, it's a ffmpeg wrapper optimized for M-chips. I did not have previous knowledge about Swift.
+Seems that coding with AI gets me far despite not knowing a specific language. My experience is based on python, data science, and scientific progamming for lab experiments with LabView.
