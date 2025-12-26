@@ -1,39 +1,39 @@
-# Xcode
-## Build generated
-build/
-DerivedData/
-
-## Various settings
-*.pbxuser
-!default.pbxuser
-*.mode1v3
-!default.mode1v3
-*.mode2v3
-!default.mode2v3
-*.perspectivev3
-!default.perspectivev3
-xcuserdata/
-
-## Other
-*.moved-aside
-*.xcuserstate
-*.xcscmblueprint
-
-# Swift Package Manager
-.build/
-Packages/
-*.xcodeproj/project.xcworkspace/
-*.xcodeproj/xcshareddata/
-
-# Cocoapods
-Pods/
-
-# Carthage
-Carthage/
-
-# Secrets (if applicable)
-*.env
-secrets.*
-
-# macOS
+# --- macOS System Files ---
 .DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# --- Xcode ---
+# User-specific project settings (window sizes, open files, etc.)
+*.xcuserdata
+*.xcuserstate
+*.xccheckout
+*.moved-aside
+DerivedData/
+build/
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# --- Swift Package Manager ---
+.swiftpm/xcode/
+.build/
+
+# --- Video Converter Specifics ---
+# Ignore large test videos so they don't bloat your repo
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.flv
+# (Add other formats you test with here)
+
+# --- Archives & Large Binaries ---
+# You already unzipped ffmpeg, so ignore the zip/7z files
+*.zip
+*.7z
+*.tar.gz
+*.rar

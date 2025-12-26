@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		7C8A87782EFEC8E400A48670 /* .gitignore in Resources */ = {isa = PBXBuildFile; fileRef = 7C8A87772EFEC8E400A48670 /* .gitignore */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		7CA1A3092D56B75500F1FDB3 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -24,6 +28,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		7C8A87772EFEC8E400A48670 /* .gitignore */ = {isa = PBXFileReference; lastKnownFileType = text; path = .gitignore; sourceTree = "<group>"; };
 		7CA1A2F72D56B75400F1FDB3 /* LocalVideoConverterMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LocalVideoConverterMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		7CA1A3082D56B75500F1FDB3 /* LocalVideoConverterMacTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LocalVideoConverterMacTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		7CA1A3122D56B75500F1FDB3 /* LocalVideoConverterMacUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = LocalVideoConverterMacUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -33,16 +38,6 @@
 		7CA1A2F92D56B75400F1FDB3 /* LocalVideoConverterMac */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = LocalVideoConverterMac;
-			sourceTree = "<group>";
-		};
-		7CA1A30B2D56B75500F1FDB3 /* LocalVideoConverterMacTests */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = LocalVideoConverterMacTests;
-			sourceTree = "<group>";
-		};
-		7CA1A3152D56B75500F1FDB3 /* LocalVideoConverterMacUITests */ = {
-			isa = PBXFileSystemSynchronizedRootGroup;
-			path = LocalVideoConverterMacUITests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -75,8 +70,7 @@
 		7CA1A2EE2D56B75400F1FDB3 = {
 			isa = PBXGroup;
 			children = (
-				7CA1A30B2D56B75500F1FDB3 /* LocalVideoConverterMacTests */,
-				7CA1A3152D56B75500F1FDB3 /* LocalVideoConverterMacUITests */,
+				7C8A87772EFEC8E400A48670 /* .gitignore */,
 				7CA1A2F82D56B75400F1FDB3 /* Products */,
 				7CA1A2F92D56B75400F1FDB3 /* LocalVideoConverterMac */,
 			);
@@ -130,9 +124,6 @@
 			dependencies = (
 				7CA1A30A2D56B75500F1FDB3 /* PBXTargetDependency */,
 			);
-			fileSystemSynchronizedGroups = (
-				7CA1A30B2D56B75500F1FDB3 /* LocalVideoConverterMacTests */,
-			);
 			name = LocalVideoConverterMacTests;
 			packageProductDependencies = (
 			);
@@ -152,9 +143,6 @@
 			);
 			dependencies = (
 				7CA1A3142D56B75500F1FDB3 /* PBXTargetDependency */,
-			);
-			fileSystemSynchronizedGroups = (
-				7CA1A3152D56B75500F1FDB3 /* LocalVideoConverterMacUITests */,
 			);
 			name = LocalVideoConverterMacUITests;
 			packageProductDependencies = (
@@ -212,6 +200,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				7C8A87782EFEC8E400A48670 /* .gitignore in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
